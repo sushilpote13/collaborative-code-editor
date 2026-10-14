@@ -47,6 +47,13 @@ If the browser reports `502` for an `/api` request, the Vite proxy cannot reach 
 - Login and signup set a short-lived, HTTP-only authentication cookie. The editor route verifies the cookie; use **Log out** to clear it.
 - The database and `users` collection are created by MongoDB/Mongoose when the first account is stored. Passwords are never logged or returned to the browser.
 
+## Java editor
+
+- The authenticated editor opens `Main.java` with Java syntax highlighting. Close the tab with `×`; reopen it from the project explorer.
+- Click **Run Java** to send the source and optional standard input to the local backend. The backend compiles it with `javac` and runs its `Main` class; compiler diagnostics, standard output, and runtime errors appear in the output panel.
+- Install a JDK and make sure both `javac` and `java` are on `PATH`.
+- The local runner limits source to 32 KB, compile time to 15 seconds, execution time to 8 seconds, Java heap to 128 MB, and output to 64 KB. It runs code as the same operating-system user as the backend; it is for local development with code you trust, **not** a secure sandbox for public or untrusted code.
+
 Run frontend checks with:
 
 ```powershell
