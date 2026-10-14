@@ -1,52 +1,31 @@
-import { createServer } from 'node:http';
+import 'dotenv/config';
+import mongoose from 'mongoose';
+import { createApp } from './server/app.js';
 
 const port = 3001;
-const maxBodyBytes = 10_000;
 
-const server = createServer(async (request, response) => {
-  if (request.method !== 'POST' || request.url !== '/api/signup') {
-    response.writeHead(404).end('Not found');
-    return;
+async function startServer() {
+  const mongoUri = process.env.MONGODB_URI;
+  const jwtSecret = process.env.JWT_SECRET;
+
+  if (!mongoUri) {
+    throw new Error('MONGODB_URI is required. Copy .env.example to .env and configure it.');
   }
 
-  let body = '';
-  for await (const chunk of request) {
-    body += chunk;
-    if (Buffer.byteLength(body) > maxBodyBytes) {
-      response.writeHead(413).end('Request body too large');
-      return;
-    }
+  if (!jwtSecret || jwtSecret.length < 32 || jwtSecret.startsWith('replace-this')) {
+    throw new Error('JWT_SECRET must be set to a random value of at least 32 characters.');
   }
 
-  let details;
-  try {
-    details = JSON.parse(body);
-  } catch {
-    response.writeHead(400).end('Invalid JSON');
-    return;
-  }
+  await mongoose.connect(mongoUri);
+  console.log('Connected to MongoDB.');
 
-  if (typeof details !== 'object' || details === null || Array.isArray(details)) {
-    response.writeHead(400).end('Expected a JSON object');
-    return;
-  }
-
-  const { firstName, lastName, email } = details;
-  if (![firstName, lastName, email].every((value) => typeof value === 'string' && value.trim())) {
-    response.writeHead(400).end('First name, last name, and email are required');
-    return;
-  }
-
-  console.log('Signup details received:', {
-    firstName: firstName.trim(),
-    lastName: lastName.trim(),
-    email: email.trim(),
+  const app = createApp();
+  app.listen(port, '127.0.0.1', () => {
+    console.log(`Auth API listening at http://127.0.0.1:${port}`);
   });
+}
 
-  response.writeHead(200, { 'Content-Type': 'application/json' });
-  response.end(JSON.stringify({ received: true }));
-});
-
-server.listen(port, '127.0.0.1', () => {
-  console.log(`Signup verification API listening at http://127.0.0.1:${port}`);
+startServer().catch((error) => {
+  console.error('Could not start the auth API:', error.message);
+  process.exitCode = 1;
 });

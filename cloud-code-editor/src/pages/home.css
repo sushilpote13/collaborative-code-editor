@@ -306,6 +306,51 @@
   text-underline-offset: 3px;
 }
 
+.auth-mode-toggle {
+  padding: 0;
+  border: 0;
+  color: #d2a8ff;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 650;
+}
+
+.auth-mode-toggle:hover {
+  color: #e8d3ff;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.auth-mode-toggle:focus-visible {
+  border-radius: 2px;
+  outline: 2px solid #d4afff;
+  outline-offset: 3px;
+}
+
+.auth-mode-toggle:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.create-account-button:disabled {
+  cursor: wait;
+  filter: brightness(0.82);
+}
+
+.auth-error-card {
+  min-height: 0;
+  max-width: 600px;
+  grid-template-columns: 1fr;
+}
+
+.editor-page {
+  min-height: 100vh;
+  padding: 32px;
+  color: #f4f1fa;
+  background: #09090d;
+}
+
 @media (max-width: 760px) {
   .signup-page {
     padding: 18px;

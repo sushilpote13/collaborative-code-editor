@@ -1,6 +1,8 @@
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import devLoopLogo from '../assets/DevLoop Neon Cloud Logo.png';
+import LoginForm from '../components/auth/LoginForm.jsx';
+import SignupForm from '../components/auth/SignupForm.jsx';
 import './home.css';
 
 const setupSteps = [
@@ -10,39 +12,73 @@ const setupSteps = [
 ];
 
 function Home() {
-  const [notice, setNotice] = useState('');
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [mode, setMode] = useState('login');
+  const [firstName, setFirstName] = useState('');
+  const [lastName, setLastName] = useState('');
+  const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [notice, setNotice] = useState(location.state?.notice ?? '');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  function switchMode(nextMode) {
+    setMode(nextMode);
+    setPassword('');
+    setNotice('');
+  }
 
   async function handleSubmit(event) {
     event.preventDefault();
-    setNotice('Sending your details for verification...');
+    setIsSubmitting(true);
+    setNotice('');
 
-    const formData = new FormData(event.currentTarget);
-    const details = {
-      firstName: formData.get('firstName'),
-      lastName: formData.get('lastName'),
-      email: formData.get('email'),
-    };
+    const endpoint = mode === 'login' ? '/api/auth/login' : '/api/auth/signup';
+    const payload = mode === 'login'
+      ? { email, password }
+      : { firstName, lastName, username, email, password };
 
     try {
-      const response = await fetch('/api/signup', {
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(details),
+        credentials: 'same-origin',
+        body: JSON.stringify(payload),
       });
+      if (!response.headers.get('content-type')?.includes('application/json')) {
+        throw new Error(`The authentication server returned an invalid response (HTTP ${response.status}).`);
+      }
+      const result = await response.json();
 
       if (!response.ok) {
-        throw new Error(`The server returned ${response.status}.`);
+        if (mode === 'login' && result.code === 'ACCOUNT_NOT_FOUND') {
+          setMode('signup');
+          setPassword('');
+          setNotice('No account uses this email yet. Add your name and create a password to sign up.');
+          return;
+        }
+
+        if (mode === 'signup' && result.code === 'ACCOUNT_EXISTS') {
+          setMode('login');
+          setPassword('');
+        }
+
+        setNotice(result.error || 'Authentication failed. Please try again.');
+        return;
       }
 
-      setNotice('Your name and email were sent to the server terminal for verification.');
+      navigate('/editor/demo-room', { replace: true });
     } catch (error) {
-      setNotice(`Could not send your details: ${error.message}`);
+      setNotice(`Could not reach the authentication server: ${error.message}`);
+    } finally {
+      setIsSubmitting(false);
     }
   }
 
   return (
     <main className="signup-page">
-      <section className="signup-card" aria-label="Create a DevLoop account">
+      <section className="signup-card" aria-label={mode === 'login' ? 'Log in to DevLoop' : 'Create a DevLoop account'}>
         <aside className="signup-intro">
           <img className="signup-logo" src={devLoopLogo} alt="DevLoop collaborative code editor" />
 
@@ -69,70 +105,55 @@ function Home() {
 
         <section className="signup-form-panel">
           <div className="form-heading">
-            <span className="eyebrow">Get started for free</span>
-            <h2>Create your account</h2>
-            <p>Set up your DevLoop account to start collaborating.</p>
+            <span className="eyebrow">{mode === 'login' ? 'Welcome back' : 'Get started for free'}</span>
+            <h2>{mode === 'login' ? 'Log in to DevLoop' : 'Create your account'}</h2>
+            <p>
+              {mode === 'login'
+                ? 'Enter your account details to continue.'
+                : 'Set up your DevLoop account to start collaborating.'}
+            </p>
           </div>
 
           <form className="signup-form" onSubmit={handleSubmit}>
-            <div className="name-fields">
-              <label className="form-field">
-                <span>First name</span>
-                <input
-                  autoComplete="given-name"
-                  name="firstName"
-                  placeholder="e.g. Alex"
-                  required
-                />
-              </label>
-              <label className="form-field">
-                <span>Last name</span>
-                <input
-                  autoComplete="family-name"
-                  name="lastName"
-                  placeholder="e.g. Morgan"
-                  required
-                />
-              </label>
-            </div>
-
-            <label className="form-field">
-              <span>Email address</span>
-              <input
-                autoComplete="email"
-                name="email"
-                placeholder="you@example.com"
-                required
-                type="email"
+            {mode === 'login' ? (
+              <LoginForm
+                email={email}
+                isSubmitting={isSubmitting}
+                onEmailChange={setEmail}
+                onPasswordChange={setPassword}
+                password={password}
               />
-            </label>
-
-            <label className="form-field">
-              <span>Password</span>
-              <input
-                autoComplete="new-password"
-                minLength={8}
-                name="password"
-                placeholder="At least 8 characters"
-                required
-                type="password"
+            ) : (
+              <SignupForm
+                email={email}
+                firstName={firstName}
+                isSubmitting={isSubmitting}
+                lastName={lastName}
+                onEmailChange={setEmail}
+                onFirstNameChange={setFirstName}
+                onLastNameChange={setLastName}
+                onPasswordChange={setPassword}
+                onUsernameChange={setUsername}
+                password={password}
+                username={username}
               />
-              <small>Use at least 8 characters.</small>
-            </label>
+            )}
 
-            <button className="create-account-button" type="submit">
-              Create account
-              <span aria-hidden="true">→</span>
-            </button>
-
-            <p aria-live="polite" className="form-notice">
+            <p aria-live="polite" className="form-notice" role="status">
               {notice}
             </p>
           </form>
 
           <div className="form-footer">
-            <span>Already have a workspace?</span>
-            <Link to="/editor/demo-room">Open the editor</Link>
+            <span>{mode === 'login' ? "Don't have an account?" : 'Already have an account?'}</span>
+            <button
+              className="auth-mode-toggle"
+              disabled={isSubmitting}
+              onClick={() => switchMode(mode === 'login' ? 'signup' : 'login')}
+              type="button"
+            >
+              {mode === 'login' ? 'Sign up' : 'Log in'}
+            </button>
           </div>
         </section>
       </section>
