@@ -1,25 +1,85 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import CodeMirror from '@uiw/react-codemirror';
 import { java } from '@codemirror/lang-java';
 import { oneDark } from '@codemirror/theme-one-dark';
 import './codeEditor.css';
 
-const file = { id: 'java', name: 'Main.java' };
 const initialCode = `public class Main {
     public static void main(String[] args) {
         System.out.println("Hello, DevLoop!");
     }
 }`;
+const initialFiles = [{ name: 'Main.java', source: initialCode }];
 
 const apiUnavailableMessage =
   'The authentication API is unavailable. Run "npm run dev:api" and make sure MongoDB is running.';
 
+function workspaceStorageKey(userId, roomId) {
+  return `devloop-workspace:${userId}:${roomId}`;
+}
+
+function loadWorkspace(userId, roomId) {
+  try {
+    const saved = localStorage.getItem(workspaceStorageKey(userId, roomId));
+    if (!saved) {
+      return { files: initialFiles, openFiles: ['Main.java'], activeFileName: 'Main.java' };
+    }
+
+    const workspace = JSON.parse(saved);
+    const names = new Set();
+    const validFiles = Array.isArray(workspace.files) && workspace.files.length > 0
+      && workspace.files.every((file) => {
+        if (
+          !file ||
+          typeof file.name !== 'string' ||
+          !/^[A-Za-z][A-Za-z0-9_]{0,59}\.java$/.test(file.name) ||
+          typeof file.source !== 'string' ||
+          names.has(file.name.toLowerCase())
+        ) {
+          return false;
+        }
+        names.add(file.name.toLowerCase());
+        return true;
+      });
+
+    if (!validFiles || !workspace.files.some((file) => file.name === 'Main.java')) {
+      return { files: initialFiles, openFiles: ['Main.java'], activeFileName: 'Main.java' };
+    }
+
+    const fileNames = new Set(workspace.files.map((file) => file.name));
+    const openFiles = Array.isArray(workspace.openFiles)
+      ? [...new Set(workspace.openFiles.filter((name) => fileNames.has(name)))]
+      : ['Main.java'];
+    const activeFileName = fileNames.has(workspace.activeFileName) &&
+      openFiles.includes(workspace.activeFileName)
+      ? workspace.activeFileName
+      : openFiles[0] || null;
+    return { files: workspace.files, openFiles, activeFileName };
+  } catch (error) {
+    console.error('Could not load the saved workspace:', error);
+    return { files: initialFiles, openFiles: ['Main.java'], activeFileName: 'Main.java' };
+  }
+}
+
+function getFileNameError(name, files, currentName = null) {
+  if (!/^[A-Za-z][A-Za-z0-9_]{0,59}\.java$/.test(name)) {
+    return 'Use a Java filename such as Helper.java (letters, numbers, and underscores only).';
+  }
+  if (files.some((file) => file.name.toLowerCase() === name.toLowerCase() && file.name !== currentName)) {
+    return 'A file with that name already exists.';
+  }
+  return '';
+}
+
 function CodeEditor({ user }) {
   const navigate = useNavigate();
   const { roomId } = useParams();
-  const [source, setSource] = useState(initialCode);
-  const [isFileOpen, setIsFileOpen] = useState(true);
+  const [workspace, setWorkspace] = useState(() => loadWorkspace(user.id, roomId));
+  const { files, openFiles, activeFileName } = workspace;
+  const [fileAction, setFileAction] = useState(null);
+  const [fileNameDraft, setFileNameDraft] = useState('');
+  const [fileActionError, setFileActionError] = useState('');
   const [isProjectExpanded, setIsProjectExpanded] = useState(true);
   const [isOpenEditorsExpanded, setIsOpenEditorsExpanded] = useState(true);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
@@ -28,6 +88,115 @@ function CodeEditor({ user }) {
   const [output, setOutput] = useState('');
   const [outputKind, setOutputKind] = useState('empty');
   const [requestError, setRequestError] = useState('');
+
+  const activeFile = files.find((file) => file.name === activeFileName);
+  const isFileOpen = Boolean(activeFile && openFiles.includes(activeFileName));
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(workspaceStorageKey(user.id, roomId), JSON.stringify(workspace));
+    } catch (error) {
+      console.error('Could not save the workspace locally:', error);
+    }
+  }, [roomId, user.id, workspace]);
+
+  function openFile(name) {
+    setWorkspace((current) => ({
+      ...current,
+      openFiles: current.openFiles.includes(name) ? current.openFiles : [...current.openFiles, name],
+      activeFileName: name,
+    }));
+  }
+
+  function closeFile(name) {
+    setWorkspace((current) => {
+      const nextOpenFiles = current.openFiles.filter((openName) => openName !== name);
+      return {
+        ...current,
+        openFiles: nextOpenFiles,
+        activeFileName: current.activeFileName === name
+          ? nextOpenFiles[nextOpenFiles.length - 1] || null
+          : current.activeFileName,
+      };
+    });
+  }
+
+  function startFileAction(action, name = '') {
+    setFileAction({ type: action, currentName: name });
+    setFileNameDraft(name);
+    setFileActionError('');
+  }
+
+  function saveFileAction(event) {
+    event.preventDefault();
+    const name = fileNameDraft.trim();
+    const error = getFileNameError(name, files, fileAction.currentName);
+    if (error) {
+      setFileActionError(error);
+      return;
+    }
+
+    if (fileAction.type === 'create') {
+      if (files.length >= 20) {
+        setFileActionError('A workspace can contain up to 20 Java files.');
+        return;
+      }
+      const className = name.slice(0, -'.java'.length);
+      const newFile = {
+        name,
+        source: `public class ${className} {\n}\n`,
+      };
+      setWorkspace((current) => ({
+        ...current,
+        files: [...current.files, newFile],
+        openFiles: [...current.openFiles, name],
+        activeFileName: name,
+      }));
+    } else {
+      const oldName = fileAction.currentName;
+      setWorkspace((current) => ({
+        ...current,
+        files: current.files.map((file) => file.name === oldName ? { ...file, name } : file),
+        openFiles: current.openFiles.map((openName) => openName === oldName ? name : openName),
+        activeFileName: current.activeFileName === oldName ? name : current.activeFileName,
+      }));
+    }
+
+    setFileAction(null);
+    setFileNameDraft('');
+    setFileActionError('');
+  }
+
+  function deleteFile(name) {
+    if (name === 'Main.java') {
+      return;
+    }
+    if (!window.confirm(`Delete ${name}? This cannot be undone.`)) {
+      return;
+    }
+
+    setWorkspace((current) => {
+      const nextOpenFiles = current.openFiles.filter((openName) => openName !== name);
+      const nextFiles = current.files.filter((file) => file.name !== name);
+      return {
+        ...current,
+        files: nextFiles,
+        openFiles: nextOpenFiles,
+        activeFileName: current.activeFileName === name
+          ? nextOpenFiles[nextOpenFiles.length - 1] || 'Main.java'
+          : current.activeFileName,
+      };
+    });
+  }
+
+  function updateSource(source) {
+    setWorkspace((current) => ({
+      ...current,
+      files: current.files.map((file) =>
+        file.name === current.activeFileName ? { ...file, source } : file,
+      ),
+    }));
+  }
 
   async function runCode() {
     setIsRunning(true);
@@ -40,7 +209,7 @@ function CodeEditor({ user }) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
-        body: JSON.stringify({ source, input: programInput }),
+        body: JSON.stringify({ sourceFiles: files, input: programInput }),
       });
       const contentType = response.headers.get('content-type') || '';
       if (!contentType.includes('application/json')) {
@@ -121,6 +290,10 @@ function CodeEditor({ user }) {
           <strong>{roomId}</strong>
         </div>
         <div className="workbench-actions">
+          <button className="add-member-button" type="button">
+            <span aria-hidden="true">+</span>
+            Add member
+          </button>
           <button className="run-button" disabled={isRunning} onClick={runCode} type="button">
             <span aria-hidden="true">{isRunning ? '◌' : '▶'}</span>
             {isRunning ? 'Running…' : 'Run Java'}
@@ -152,30 +325,51 @@ function CodeEditor({ user }) {
       </header>
 
       <nav aria-label="Open files" className="file-tabs">
-        {isFileOpen && (
-          <div aria-current="page" className="file-tab is-active">
-            <span aria-hidden="true" className="file-icon file-icon-java">J</span>
-            <span className="file-tab-name">{file.name}</span>
+        {openFiles.map((name) => (
+          <div
+            className={`file-tab${name === activeFileName ? ' is-active' : ''}`}
+            key={name}
+          >
             <button
-              aria-label="Close Main.java"
+              aria-pressed={name === activeFileName}
+              className="file-tab-select"
+              onClick={() => openFile(name)}
+              type="button"
+            >
+              <span aria-hidden="true" className="file-icon file-icon-java">J</span>
+              <span className="file-tab-name">{name}</span>
+            </button>
+            <button
+              aria-label={`Close ${name}`}
               className="file-tab-close"
-              onClick={() => setIsFileOpen(false)}
-              title="Close Main.java"
+              onClick={(event) => {
+                event.stopPropagation();
+                closeFile(name);
+              }}
+              title={`Close ${name}`}
               type="button"
             >
               ×
             </button>
           </div>
-        )}
+        ))}
         <span className="file-tabs-spacer" />
-        <span className="save-indicator"><span /> Java</span>
+        <span className="save-indicator"><span /> Local workspace</span>
       </nav>
 
       <div className="workbench-body">
         <aside aria-label="Project files" className="file-explorer">
           <div className="panel-heading">
             <span>EXPLORER</span>
-            <span aria-hidden="true" className="explorer-more">···</span>
+            <button
+              aria-label="Create Java file"
+              className="explorer-add-file"
+              onClick={() => startFileAction('create')}
+              title="Create Java file"
+              type="button"
+            >
+              +
+            </button>
           </div>
           <section aria-label="Open editors" className="explorer-section">
             <button
@@ -186,19 +380,20 @@ function CodeEditor({ user }) {
             >
               <span aria-hidden="true" className={`tree-chevron${isOpenEditorsExpanded ? ' is-expanded' : ''}`} />
               <span>OPEN EDITORS</span>
-              <span className="explorer-count">{isFileOpen ? '1' : '0'}</span>
+              <span className="explorer-count">{openFiles.length}</span>
             </button>
-            {isOpenEditorsExpanded && isFileOpen && (
+            {isOpenEditorsExpanded && openFiles.map((name) => (
               <button
                 className="explorer-file open-editor-file"
-                onClick={() => setIsFileOpen(true)}
+                key={name}
+                onClick={() => openFile(name)}
                 type="button"
               >
                 <span aria-hidden="true" className="file-icon file-icon-java">J</span>
-                <span className="explorer-file-name">{file.name}</span>
+                <span className="explorer-file-name">{name}</span>
                 <span className="explorer-file-location">java-project</span>
               </button>
-            )}
+            ))}
           </section>
           <section aria-label="Workspace folder" className="explorer-section workspace-tree">
             <button
@@ -212,32 +407,74 @@ function CodeEditor({ user }) {
               <span>java-project</span>
             </button>
             {isProjectExpanded && (
-              <button
-                aria-current={isFileOpen ? 'page' : undefined}
-                className={`explorer-file${isFileOpen ? ' is-selected' : ''}`}
-                onClick={() => setIsFileOpen(true)}
-                type="button"
-              >
-                <span aria-hidden="true" className="file-icon file-icon-java">J</span>
-                <span className="explorer-file-name">{file.name}</span>
-              </button>
+              <div className="project-file-list">
+                {files.map((file) => (
+                  <div className={`explorer-file-row${file.name === activeFileName ? ' is-selected' : ''}`} key={file.name}>
+                    <button
+                      aria-current={file.name === activeFileName ? 'page' : undefined}
+                      className="explorer-file"
+                      onClick={() => openFile(file.name)}
+                      type="button"
+                    >
+                      <span aria-hidden="true" className="file-icon file-icon-java">J</span>
+                      <span className="explorer-file-name">{file.name}</span>
+                    </button>
+                    {file.name !== 'Main.java' && (
+                      <span className="file-row-actions">
+                        <button
+                          aria-label={`Rename ${file.name}`}
+                          onClick={() => startFileAction('rename', file.name)}
+                          title={`Rename ${file.name}`}
+                          type="button"
+                        >
+                          ✎
+                        </button>
+                        <button
+                          aria-label={`Delete ${file.name}`}
+                          onClick={() => deleteFile(file.name)}
+                          title={`Delete ${file.name}`}
+                          type="button"
+                        >
+                          ×
+                        </button>
+                      </span>
+                    )}
+                  </div>
+                ))}
+                {fileAction && (
+                  <form aria-label={fileAction.type === 'create' ? 'Create Java file' : 'Rename Java file'} className="file-action-form" onSubmit={saveFileAction}>
+                    <input
+                      aria-label="Java filename"
+                      autoFocus
+                      maxLength={65}
+                      onChange={(event) => setFileNameDraft(event.target.value)}
+                      placeholder="Helper.java"
+                      required
+                      value={fileNameDraft}
+                    />
+                    <button type="submit">{fileAction.type === 'create' ? 'Add' : 'Save'}</button>
+                    <button onClick={() => setFileAction(null)} type="button">Cancel</button>
+                    {fileActionError && <span className="file-action-error" role="alert">{fileActionError}</span>}
+                  </form>
+                )}
+              </div>
             )}
           </section>
           <div className="explorer-hint">
-            Java source is compiled and run by the local backend. Program output appears below.
+            Files save in this browser. Main.java is the run entry point; keep its public class name in sync when renaming other files.
           </div>
         </aside>
 
         <section aria-label="Java workspace" className="editor-stage">
           <section aria-label="Java code editor" className="code-panel">
             <div className="panel-heading code-panel-heading">
-              <span>{isFileOpen ? file.name : 'No file open'}</span>
+              <span>{isFileOpen ? activeFile.name : 'No file open'}</span>
               {isFileOpen && <span className="language-label">Java</span>}
             </div>
             {isFileOpen ? (
               <div className="code-editor-wrap">
                 <CodeMirror
-                  aria-label="Edit Main.java"
+                  aria-label={`Edit ${activeFile.name}`}
                   basicSetup={{
                     foldGutter: true,
                     highlightActiveLine: true,
@@ -246,24 +483,25 @@ function CodeEditor({ user }) {
                   className="java-code-editor"
                   extensions={[java()]}
                   height="100%"
-                  onChange={setSource}
+                  onChange={updateSource}
                   theme={oneDark}
-                  value={source}
+                  value={activeFile.source}
                 />
               </div>
             ) : (
               <div className="closed-editor-state">
-                <span className="file-icon file-icon-java">J</span>
-                <p>Main.java is closed.</p>
-                <button className="open-file-button" onClick={() => setIsFileOpen(true)} type="button">
-                  Reopen Main.java
-                </button>
+                <p>No file is open.</p>
+                {files.length > 0 && (
+                  <button className="open-file-button" onClick={() => openFile('Main.java')} type="button">
+                    Open Main.java
+                  </button>
+                )}
               </div>
             )}
             <div className="editor-statusbar">
               <span>Java</span>
               <span>UTF-8</span>
-              <span>{source.split('\n').length} lines</span>
+              <span>{activeFile ? activeFile.source.split('\n').length : 0} lines</span>
             </div>
           </section>
 
@@ -296,7 +534,7 @@ function CodeEditor({ user }) {
               </div>
             </div>
             <pre aria-live="polite" className={`program-output output-${outputKind}`}>
-              {isRunning ? 'Compiling Main.java…' : output || 'Run your Java program to see output here.'}
+              {isRunning ? 'Compiling Java project…' : output || 'Run your Java program to see output here.'}
             </pre>
           </section>
           {requestError && <p className="workbench-error" role="alert">{requestError}</p>}
@@ -305,7 +543,7 @@ function CodeEditor({ user }) {
 
       <footer className="workbench-statusbar">
         <span><span className="statusbar-check">✓</span> Ready</span>
-        <span>{isFileOpen ? file.name : 'No file open'}</span>
+        <span>{isFileOpen ? activeFile.name : 'No file open'}</span>
         <span>Java</span>
         <span>DevLoop Editor</span>
       </footer>

@@ -91,24 +91,37 @@ function runProcess(command, args, cwd, timeoutMs, input = '') {
   });
 }
 
-export async function runJava(source, input = '') {
-  if (Buffer.byteLength(source, 'utf8') > maxSourceBytes) {
-    const error = new Error(`Java source must be no larger than ${maxSourceBytes / 1024} KB.`);
+export async function runJava(sourceFiles, input = '') {
+  const sourceBytes = sourceFiles.reduce(
+    (total, file) => total + Buffer.byteLength(file.source, 'utf8'),
+    0,
+  );
+  if (sourceBytes > maxSourceBytes * 4) {
+    const error = new Error('The Java project must be no larger than 128 KB.');
     error.status = 413;
     throw error;
   }
+  for (const file of sourceFiles) {
+    if (Buffer.byteLength(file.source, 'utf8') > maxSourceBytes) {
+      const error = new Error(`${file.name} must be no larger than ${maxSourceBytes / 1024} KB.`);
+      error.status = 413;
+      throw error;
+    }
+  }
 
   const workspace = await mkdtemp(path.join(tmpdir(), 'devloop-java-'));
-  const sourcePath = path.join(workspace, 'Main.java');
+  const sourcePaths = sourceFiles.map((file) => path.join(workspace, file.name));
 
   try {
-    await writeFile(sourcePath, source, { encoding: 'utf8', flag: 'wx' });
+    await Promise.all(sourceFiles.map((file, index) =>
+      writeFile(sourcePaths[index], file.source, { encoding: 'utf8', flag: 'wx' }),
+    ));
 
     let compilation;
     try {
       compilation = await runProcess(
         'javac',
-        ['-J-Xmx256m', '-encoding', 'UTF-8', '-d', workspace, sourcePath],
+        ['-J-Xmx256m', '-encoding', 'UTF-8', '-d', workspace, ...sourcePaths],
         workspace,
         compileTimeoutMs,
       );

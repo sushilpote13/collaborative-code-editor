@@ -49,8 +49,9 @@ If the browser reports `502` for an `/api` request, the Vite proxy cannot reach 
 
 ## Java editor
 
-- The authenticated editor opens `Main.java` with Java syntax highlighting. Close the tab with `×`; reopen it from the project explorer.
-- Click **Run Java** to send the source and optional standard input to the local backend. The backend compiles it with `javac` and runs its `Main` class; compiler diagnostics, standard output, and runtime errors appear in the output panel.
+- The authenticated editor opens `Main.java` with Java syntax highlighting. Use the **+** button in the Explorer to create Java files, and use the file-row controls to rename or delete additional files. `Main.java` is kept as the run entry point.
+- Files and open tabs are saved in this browser per user and workspace. This is local browser storage, not shared live storage between collaborators.
+- Click **Run Java** to compile the workspace's Java files together and run the `Main` class, with optional standard input. A workspace can contain up to 20 files; each file is limited to 32 KB and a project to 128 KB. Compiler diagnostics, standard output, and runtime errors appear in the output panel.
 - Install a JDK and make sure both `javac` and `java` are on `PATH`.
 - The local runner limits source to 32 KB, compile time to 15 seconds, execution time to 8 seconds, Java heap to 128 MB, and output to 64 KB. It runs code as the same operating-system user as the backend; it is for local development with code you trust, **not** a secure sandbox for public or untrusted code.
 
