@@ -83,6 +83,9 @@ function CodeEditor({ user }) {
   const [isProjectExpanded, setIsProjectExpanded] = useState(true);
   const [isOpenEditorsExpanded, setIsOpenEditorsExpanded] = useState(true);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const [isMembersOpen, setIsMembersOpen] = useState(true);
+  const [members, setMembers] = useState([]);
+  const [presenceError, setPresenceError] = useState('');
   const [isRunning, setIsRunning] = useState(false);
   const [programInput, setProgramInput] = useState('');
   const [output, setOutput] = useState('');
@@ -91,6 +94,45 @@ function CodeEditor({ user }) {
 
   const activeFile = files.find((file) => file.name === activeFileName);
   const isFileOpen = Boolean(activeFile && openFiles.includes(activeFileName));
+
+  useEffect(() => {
+    let isCurrent = true;
+    const controller = new AbortController();
+
+    async function refreshPresence() {
+      try {
+        const response = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/presence`, {
+          method: 'PUT',
+          credentials: 'same-origin',
+          signal: controller.signal,
+        });
+        const result = await response.json();
+        if (response.status === 401) {
+          navigate('/', { replace: true, state: { notice: 'Please log in to stay in this meeting.' } });
+          return;
+        }
+        if (!response.ok) {
+          throw new Error(result.error || `The server returned ${response.status}.`);
+        }
+        if (isCurrent) {
+          setMembers(result.members);
+          setPresenceError('');
+        }
+      } catch (error) {
+        if (isCurrent && error.name !== 'AbortError') {
+          setPresenceError(`Could not update meeting members: ${error.message}`);
+        }
+      }
+    }
+
+    refreshPresence();
+    const intervalId = window.setInterval(refreshPresence, 10_000);
+    return () => {
+      isCurrent = false;
+      controller.abort();
+      window.clearInterval(intervalId);
+    };
+  }, [navigate, roomId]);
 
   useEffect(() => {
     try {
@@ -290,7 +332,21 @@ function CodeEditor({ user }) {
           <strong>{roomId}</strong>
         </div>
         <div className="workbench-actions">
-          <button className="add-member-button" type="button">
+          <button
+            aria-expanded={isMembersOpen}
+            className="members-toggle-button"
+            onClick={() => setIsMembersOpen((open) => !open)}
+            type="button"
+          >
+            <span aria-hidden="true" className="members-live-dot" />
+            Members
+            <span className="members-count">{members.length}</span>
+          </button>
+          <button
+            className="add-member-button"
+            onClick={() => navigate('/meetings', { state: { returnRoomId: roomId } })}
+            type="button"
+          >
             <span aria-hidden="true">+</span>
             Add member
           </button>
@@ -539,6 +595,52 @@ function CodeEditor({ user }) {
           </section>
           {requestError && <p className="workbench-error" role="alert">{requestError}</p>}
         </section>
+        {isMembersOpen && (
+          <aside aria-label="Meeting members" className="members-sidebar">
+            <div className="members-sidebar-heading">
+              <div>
+                <span className="members-live-dot" />
+                <h2>Members</h2>
+                <span className="members-count">{members.length}</span>
+              </div>
+              <button
+                aria-label="Close members sidebar"
+                className="members-sidebar-close"
+                onClick={() => setIsMembersOpen(false)}
+                type="button"
+              >
+                ×
+              </button>
+            </div>
+            <p className="members-room-label">IN THIS ROOM</p>
+            {presenceError && <p className="members-error" role="alert">{presenceError}</p>}
+            {members.length > 0 ? (
+              <ul className="members-list">
+                {members.map((member) => {
+                  const name = member.username
+                    ? `@${member.username}`
+                    : `${member.firstName} ${member.lastName}`;
+                  const isCurrentUser = member.id === user.id;
+                  return (
+                    <li className="member-item" key={member.id}>
+                      <span className="member-avatar">
+                        {(member.username || member.firstName || '?')[0].toUpperCase()}
+                      </span>
+                      <span className="member-details">
+                        <span className="member-name">{name}{isCurrentUser ? ' (you)' : ''}</span>
+                        <span className="member-status">Online</span>
+                      </span>
+                      <span aria-label="Online" className="member-online-dot" />
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : (
+              <p className="members-empty">Connecting to this room…</p>
+            )}
+            <p className="members-sync-note">Members refresh automatically while they’re in this room.</p>
+          </aside>
+        )}
       </div>
 
       <footer className="workbench-statusbar">

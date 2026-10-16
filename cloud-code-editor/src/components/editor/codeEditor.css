@@ -94,6 +94,49 @@
   margin-left: auto;
 }
 
+.members-toggle-button {
+  display: flex;
+  min-height: 33px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  border: 1px solid #393644;
+  border-radius: 7px;
+  background: #1b1a22;
+  color: #d8d4e0 !important;
+  cursor: pointer;
+  font-size: 12px !important;
+}
+
+.members-toggle-button:hover,
+.members-toggle-button[aria-expanded="true"] {
+  border-color: #514362;
+  background: #24202d;
+}
+
+.members-live-dot,
+.member-online-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: #54d39a;
+  box-shadow: 0 0 8px rgb(84 211 154 / 42%);
+}
+
+.members-count {
+  display: inline-grid;
+  min-width: 19px;
+  height: 19px;
+  place-items: center;
+  padding: 0 5px;
+  border-radius: 10px;
+  color: #e9d5ff;
+  background: #3b2b4d;
+  font-size: 10px;
+  font-weight: 700;
+}
+
 .add-member-button {
   display: flex;
   min-height: 33px;
@@ -321,6 +364,148 @@
   display: flex;
   min-height: 0;
   flex: 1;
+}
+
+.members-sidebar {
+  display: flex;
+  width: 258px;
+  flex: 0 0 258px;
+  flex-direction: column;
+  overflow: auto;
+  border-left: 1px solid var(--editor-border);
+  background: #15151c;
+}
+
+.members-sidebar-heading {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--editor-border);
+}
+
+.members-sidebar-heading > div {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.members-sidebar-heading h2 {
+  margin: 0;
+  color: #e7e3ed;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.members-sidebar-close {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #aaa6b5 !important;
+  cursor: pointer;
+  font-size: 19px !important;
+}
+
+.members-sidebar-close:hover {
+  background: #292633;
+  color: #f0edf6 !important;
+}
+
+.members-room-label {
+  margin: 17px 14px 9px;
+  color: #817d8c;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+.members-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+  padding: 0 8px;
+  list-style: none;
+}
+
+.member-item {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 7px;
+  border-radius: 7px;
+}
+
+.member-item:hover {
+  background: #20202a;
+}
+
+.member-avatar {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  place-items: center;
+  border: 1px solid #735396;
+  border-radius: 50%;
+  color: #f1e7ff;
+  background: #493166;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.member-details {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.member-name {
+  overflow: hidden;
+  color: #e3dfeb;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.member-status {
+  color: #54d39a;
+  font-size: 10px;
+}
+
+.member-online-dot {
+  width: 6px;
+  height: 6px;
+  flex-basis: 6px;
+}
+
+.members-empty,
+.members-error {
+  margin: 8px 14px;
+  color: #9693a2;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.members-error {
+  color: #fca5a5;
+}
+
+.members-sync-note {
+  margin: auto 14px 14px;
+  padding-top: 12px;
+  border-top: 1px solid #302e39;
+  color: #777482;
+  font-size: 10px;
+  line-height: 1.5;
 }
 
 .file-explorer {
@@ -905,6 +1090,12 @@
     gap: 6px;
   }
 
+  .members-toggle-button {
+    gap: 5px;
+    padding-inline: 7px;
+    font-size: 11px !important;
+  }
+
   .add-member-button {
     gap: 4px;
     padding-inline: 8px;
@@ -918,6 +1109,21 @@
   .file-explorer {
     width: 165px;
     flex-basis: 165px;
+  }
+
+  .workbench-body {
+    position: relative;
+  }
+
+  .members-sidebar {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 3;
+    width: 250px;
+    max-width: calc(100vw - 24px);
+    box-shadow: -14px 0 32px rgb(0 0 0 / 35%);
   }
 
   .file-tab {
@@ -940,6 +1146,18 @@
 
   .workbench-actions {
     gap: 2px;
+  }
+
+  .members-toggle-button {
+    gap: 4px;
+    padding-inline: 5px;
+    font-size: 10px !important;
+  }
+
+  .members-toggle-button .members-live-dot {
+    width: 6px;
+    height: 6px;
+    flex-basis: 6px;
   }
 
   .add-member-button {

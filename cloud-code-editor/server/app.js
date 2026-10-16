@@ -2,6 +2,7 @@ import cookieParser from 'cookie-parser';
 import express from 'express';
 import authRoutes from './routes/authRoutes.js';
 import javaRoutes from './routes/javaRoutes.js';
+import roomRoutes from './routes/roomRoutes.js';
 
 export function createApp() {
   const app = express();
@@ -10,6 +11,7 @@ export function createApp() {
   app.use(cookieParser());
   app.use('/api/auth', authRoutes);
   app.use('/api/java', javaRoutes);
+  app.use('/api/rooms', roomRoutes);
   app.use((request, response) => {
     response.status(404).json({ error: 'Route not found.' });
   });
