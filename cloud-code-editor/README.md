@@ -48,14 +48,17 @@ If the browser reports `502` for an `/api` request, check the terminal for an AP
 - Select **Create new meeting** to create a room and open its Java workspace. Room IDs are random UUIDs and rooms are stored in MongoDB.
 - To join, enter a room ID or open a copied invite URL. Invitees must have an account and be logged in. The server checks the signed authentication cookie, validates the room ID, and confirms the room exists before admitting a Socket.IO connection.
 - Use **Copy invite link** in the editor to share the current room. Anyone with that link and a signed-in account can join; treat it as an invitation.
-- CodeMirror edits are synchronized as Yjs shared text documents. The shared workspace state is persisted with its MongoDB room, so code remains available after reconnects and API restarts. File creation, renaming, and deletion are shared too; open tabs remain local to each browser.
+- Each CodeMirror editor is bound to the Yjs text for its active file, and Socket.IO relays binary Yjs and awareness updates between members of that room. Concurrent edits merge through Yjs; reconnecting and late-joining clients receive the latest room document. The shared workspace state is persisted with its MongoDB room, so code remains available after API restarts. File creation, renaming, and deletion are shared too; open tabs remain local to each browser.
 - Member lists and join/leave notices update over Socket.IO. Presence is held in API process memory and resets when the API restarts. This setup expects one API instance; multiple instances require a shared Socket.IO adapter and coordinated presence.
 - Vite proxies both `/api` HTTP requests and `/socket.io` WebSocket connections to the API on port `3001`. Start the frontend and API together with `npm run dev`.
 
 ## Java editor
 
-- The authenticated editor opens `Main.java` with Java syntax highlighting. Use the **+** button in the Explorer to create Java files, and use the file-row controls to rename or delete additional files. `Main.java` is kept as the run entry point.
+- The authenticated editor opens `Main.java` with Java syntax highlighting and a runnable `Hello, DevLoop!` starter. New Java files receive the same starter with a class name matching the filename. Use the **+** button in the Explorer to create Java files, and use the file-row controls to rename or delete additional files. `Main.java` is kept as the run entry point.
 - Click **Run Java** to compile the workspace's Java files together and run the `Main` class, with optional standard input. A workspace can contain up to 20 files; each file is limited to 32 KB and a project to 128 KB. Compiler diagnostics, standard output, and runtime errors appear in the output panel.
+- Collapse or resize the Explorer, Members, and output panels with their toolbar toggles and splitters. The editor supports open-file tabs, dark/light themes, zoom controls, and fullscreen mode.
+- Use **Ctrl+S** to save the current workspace snapshot in this browser; live Yjs updates are synchronized to the room automatically. **Ctrl+P** opens a file, and **Ctrl+Shift+F** searches across workspace files.
+- The console can be collapsed, resized, cleared, and rerun. Stopping a running program is not available because the current Java API runs synchronously and does not expose cancellation.
 - Install a JDK and make sure both `javac` and `java` are on `PATH`.
 - The local runner limits source to 32 KB, compile time to 15 seconds, execution time to 8 seconds, Java heap to 128 MB, and output to 64 KB. It runs code as the same operating-system user as the backend; it is for local development with code you trust, **not** a secure sandbox for public or untrusted code.
 

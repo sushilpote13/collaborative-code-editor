@@ -6,9 +6,20 @@ import express from 'express';
 import jwt from 'jsonwebtoken';
 import * as Y from 'yjs';
 import { createRoomRouter } from '../server/routes/roomRoutes.js';
-import { initialCode } from '../shared/initialWorkspace.js';
+import { createInitialCode, initialCode } from '../shared/initialWorkspace.js';
 
 const jwtSecret = 'room-creation-test-secret';
+const expectedStarterCode = `public class Main {
+    public static void main(String[] args) {
+        System.out.println("Hello, DevLoop!");
+    }
+}
+`;
+
+test('workspace starters use the runnable DevLoop greeting and match each Java filename', () => {
+  assert.equal(initialCode, expectedStarterCode);
+  assert.equal(createInitialCode('Helper'), expectedStarterCode.replace('Main', 'Helper'));
+});
 
 test('authenticated room creation stores a seeded Yjs workspace', async () => {
   process.env.JWT_SECRET = jwtSecret;
@@ -51,7 +62,7 @@ test('authenticated room creation stores a seeded Yjs workspace', async () => {
 
     const document = new Y.Doc();
     Y.applyUpdate(document, createdRoom.state);
-    assert.equal(document.getMap('files').get('Main.java').toString(), initialCode);
+    assert.equal(document.getMap('files').get('Main.java').toString(), expectedStarterCode);
     document.destroy();
   } finally {
     await new Promise((resolve, reject) => {

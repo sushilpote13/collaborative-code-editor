@@ -7,8 +7,33 @@ function bytesFromBase64(value) {
   return Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
 }
 
+function toUint8Array(value) {
+  if (value instanceof Uint8Array) {
+    return value;
+  }
+  if (value instanceof ArrayBuffer) {
+    return new Uint8Array(value);
+  }
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+  return null;
+}
+
 function getDisplayName(user) {
   return user.username ? `@${user.username}` : `${user.firstName} ${user.lastName}`;
+}
+
+function getUserCursorColor(userId) {
+  let hash = 0;
+  for (const character of userId) {
+    hash = (hash * 31 + character.charCodeAt(0)) | 0;
+  }
+  const hue = Math.abs(hash) % 360;
+  return {
+    color: `hsl(${hue}, 78%, 70%)`,
+    colorLight: `hsla(${hue}, 78%, 62%, 0.28)`,
+  };
 }
 
 export function useCollaborativeRoom(roomId, user) {
@@ -33,7 +58,7 @@ export function useCollaborativeRoom(roomId, user) {
     awareness.setLocalStateField('user', {
       id: user.id,
       name: getDisplayName(user),
-      color: '#c084fc',
+      ...getUserCursorColor(user.id),
     });
     function updateRoomState(patch) {
       setRoomState((current) => ({
@@ -84,7 +109,16 @@ export function useCollaborativeRoom(roomId, user) {
       });
     }
 
-    function handleDocumentUpdate({ update }) {
+    function handleDocumentUpdate(payload) {
+      const update = toUint8Array(payload?.update);
+      if (!update) {
+        console.error('Received an invalid remote workspace update.');
+        updateRoomState({
+          error: 'A workspace update could not be applied. Reconnect to synchronize.',
+        });
+        return;
+      }
+
       try {
         Y.applyUpdate(document, update, 'remote');
       } catch (syncError) {
@@ -95,7 +129,13 @@ export function useCollaborativeRoom(roomId, user) {
       }
     }
 
-    function handleAwarenessUpdate({ update }) {
+    function handleAwarenessUpdate(payload) {
+      const update = toUint8Array(payload?.update);
+      if (!update) {
+        console.error('Received an invalid participant update.');
+        return;
+      }
+
       try {
         applyAwarenessUpdate(awareness, update, 'remote');
       } catch (syncError) {

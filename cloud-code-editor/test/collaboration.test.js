@@ -15,6 +15,9 @@ function createRoomState() {
   const mainFile = new Y.Text();
   mainFile.insert(0, initialCode);
   document.getMap('files').set('Main.java', mainFile);
+  const helperFile = new Y.Text();
+  helperFile.insert(0, 'public class Helper {\n}\n');
+  document.getMap('files').set('Helper.java', helperFile);
   const state = Buffer.from(Y.encodeStateAsUpdate(document));
   document.destroy();
   return state;
@@ -36,6 +39,7 @@ function emitWithAck(socket, eventName, payload) {
 
 async function startTestServer() {
   const roomId = `room-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const isolatedRoomId = `other-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const users = new Map([
     ['user-one', {
       _id: { toString: () => 'user-one' },
@@ -51,6 +55,11 @@ async function startTestServer() {
     }],
   ]);
   const room = { roomId, state: createRoomState() };
+  const isolatedRoom = { roomId: isolatedRoomId, state: createRoomState() };
+  const rooms = new Map([
+    [room.roomId, room],
+    [isolatedRoom.roomId, isolatedRoom],
+  ]);
   let persistenceWaiter = null;
   const UserModel = {
     findById(id) {
@@ -59,11 +68,12 @@ async function startTestServer() {
   };
   const RoomModel = {
     async findOne({ roomId: requestedRoomId }) {
-      return requestedRoomId === room.roomId ? room : null;
+      return rooms.get(requestedRoomId) ?? null;
     },
     async updateOne({ roomId: requestedRoomId }, { $set }) {
-      if (requestedRoomId === room.roomId) {
-        room.state = $set.state;
+      const requestedRoom = rooms.get(requestedRoomId);
+      if (requestedRoom) {
+        requestedRoom.state = $set.state;
         persistenceWaiter?.resolve();
         persistenceWaiter = null;
       }
@@ -91,6 +101,7 @@ async function startTestServer() {
     connect,
     room,
     roomId,
+    isolatedRoomId,
     url: `http://127.0.0.1:${port}`,
     waitForPersistence() {
       return new Promise((resolve, reject) => {
@@ -145,9 +156,18 @@ test('authenticated room members receive Yjs updates and leave notifications', a
   const server = await startTestServer();
   const first = server.connect('user-one');
   const second = server.connect('user-two');
+  const isolatedClient = server.connect('user-two');
+  let isolatedRoomUpdateReceived = false;
+  isolatedClient.on('room:document-update', () => {
+    isolatedRoomUpdateReceived = true;
+  });
 
   try {
-    await Promise.all([waitForEvent(first, 'connect'), waitForEvent(second, 'connect')]);
+    await Promise.all([
+      waitForEvent(first, 'connect'),
+      waitForEvent(second, 'connect'),
+      waitForEvent(isolatedClient, 'connect'),
+    ]);
     const firstJoin = await emitWithAck(first, 'room:join', { roomId: server.roomId });
     assert.equal(firstJoin.ok, true);
     assert.equal(firstJoin.members.length, 1);
@@ -157,6 +177,14 @@ test('authenticated room members receive Yjs updates and leave notifications', a
     assert.equal(secondJoin.ok, true);
     assert.equal(secondJoin.members.length, 2);
     assert.equal((await joinedNotice).username, 'second_user');
+
+    const isolatedJoin = await emitWithAck(
+      isolatedClient,
+      'room:join',
+      { roomId: server.isolatedRoomId },
+    );
+    assert.equal(isolatedJoin.ok, true);
+    assert.equal(isolatedJoin.members.length, 1);
 
     const invalidUpdate = waitForEvent(first, 'room:error');
     first.emit('room:document-update', { update: new Uint8Array([0, 1, 2]) });
@@ -182,12 +210,128 @@ test('authenticated room members receive Yjs updates and leave notifications', a
       synchronizedDocument.getMap('files').get('Main.java').toString(),
       /\/\/ shared update/,
     );
+    assert.equal(
+      synchronizedDocument.getMap('files').get('Helper.java').toString(),
+      'public class Helper {\n}\n',
+    );
     await persisted;
+
+    const reverseUpdate = waitForEvent(first, 'room:document-update');
+    const reversePersisted = server.waitForPersistence();
+    synchronizedDocument.getMap('files').get('Main.java').insert(
+      synchronizedDocument.getMap('files').get('Main.java').length,
+      '\n// reverse shared update',
+    );
+    second.emit('room:document-update', {
+      update: Y.encodeStateAsUpdate(synchronizedDocument),
+    });
+    const reversePacket = await reverseUpdate;
+    await reversePersisted;
+    const firstDocument = new Y.Doc();
+    Y.applyUpdate(firstDocument, Buffer.from(firstJoin.state, 'base64'));
+    Y.applyUpdate(firstDocument, reversePacket.update);
+    assert.match(
+      firstDocument.getMap('files').get('Main.java').toString(),
+      /\/\/ reverse shared update/,
+    );
+
+    const helperUpdate = waitForEvent(first, 'room:document-update');
+    const helperPersisted = server.waitForPersistence();
+    const helperText = synchronizedDocument.getMap('files').get('Helper.java');
+    helperText.insert(helperText.length, '\n// helper-only update');
+    second.emit('room:document-update', {
+      update: Y.encodeStateAsUpdate(synchronizedDocument),
+    });
+    const helperPacket = await helperUpdate;
+    await helperPersisted;
+    Y.applyUpdate(firstDocument, helperPacket.update);
+    assert.match(
+      firstDocument.getMap('files').get('Helper.java').toString(),
+      /\/\/ helper-only update/,
+    );
+    assert.doesNotMatch(
+      firstDocument.getMap('files').get('Main.java').toString(),
+      /helper-only update/,
+    );
+
+    const firstText = firstDocument.getMap('files').get('Main.java');
+    const secondText = synchronizedDocument.getMap('files').get('Main.java');
+    firstText.insert(0, '// concurrent from first\n');
+    secondText.insert(0, '// concurrent from second\n');
+    const firstConcurrentUpdate = waitForEvent(first, 'room:document-update');
+    const secondConcurrentUpdate = waitForEvent(second, 'room:document-update');
+    const concurrentPersisted = server.waitForPersistence();
+    first.emit('room:document-update', { update: Y.encodeStateAsUpdate(firstDocument) });
+    second.emit('room:document-update', {
+      update: Y.encodeStateAsUpdate(synchronizedDocument),
+    });
+    const [firstConcurrentPacket, secondConcurrentPacket] = await Promise.all([
+      firstConcurrentUpdate,
+      secondConcurrentUpdate,
+    ]);
+    Y.applyUpdate(firstDocument, firstConcurrentPacket.update);
+    Y.applyUpdate(synchronizedDocument, secondConcurrentPacket.update);
+    await concurrentPersisted;
+    assert.equal(
+      firstText.toString(),
+      secondText.toString(),
+      'simultaneous Yjs edits should converge on both clients',
+    );
+    assert.match(firstText.toString(), /\/\/ concurrent from first/);
+    assert.match(firstText.toString(), /\/\/ concurrent from second/);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(isolatedRoomUpdateReceived, false);
+    const isolatedDocument = new Y.Doc();
+    Y.applyUpdate(isolatedDocument, Buffer.from(isolatedJoin.state, 'base64'));
+    assert.doesNotMatch(
+      isolatedDocument.getMap('files').get('Main.java').toString(),
+      /shared update|concurrent from/,
+    );
+    isolatedDocument.destroy();
+
+    const latestJoiner = server.connect('user-one');
+    await waitForEvent(latestJoiner, 'connect');
+    const latestJoin = await emitWithAck(latestJoiner, 'room:join', { roomId: server.roomId });
+    assert.equal(latestJoin.ok, true);
+    const latestDocument = new Y.Doc();
+    Y.applyUpdate(latestDocument, Buffer.from(latestJoin.state, 'base64'));
+    assert.match(
+      latestDocument.getMap('files').get('Main.java').toString(),
+      /\/\/ reverse shared update/,
+    );
+    assert.match(
+      latestDocument.getMap('files').get('Main.java').toString(),
+      /\/\/ concurrent from first/,
+    );
+    assert.match(
+      latestDocument.getMap('files').get('Main.java').toString(),
+      /\/\/ concurrent from second/,
+    );
+    assert.match(
+      latestDocument.getMap('files').get('Helper.java').toString(),
+      /\/\/ helper-only update/,
+    );
+    latestDocument.destroy();
+    firstDocument.destroy();
+    latestJoiner.disconnect();
+
     const persistedDocument = new Y.Doc();
     Y.applyUpdate(persistedDocument, server.room.state);
     assert.match(
       persistedDocument.getMap('files').get('Main.java').toString(),
-      /\/\/ shared update/,
+      /\/\/ reverse shared update/,
+    );
+    assert.match(
+      persistedDocument.getMap('files').get('Main.java').toString(),
+      /\/\/ concurrent from first/,
+    );
+    assert.match(
+      persistedDocument.getMap('files').get('Main.java').toString(),
+      /\/\/ concurrent from second/,
+    );
+    assert.match(
+      persistedDocument.getMap('files').get('Helper.java').toString(),
+      /\/\/ helper-only update/,
     );
 
     const leftNotice = waitForEvent(first, 'room:participant-left');
@@ -199,6 +343,7 @@ test('authenticated room members receive Yjs updates and leave notifications', a
   } finally {
     first.disconnect();
     second.disconnect();
+    isolatedClient.disconnect();
     await server.close();
   }
 });

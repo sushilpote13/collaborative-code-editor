@@ -1,12 +1,18 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import CodeMirror from '@uiw/react-codemirror';
+import { closeBrackets } from '@codemirror/autocomplete';
 import { java } from '@codemirror/lang-java';
+import { bracketMatching, indentOnInput } from '@codemirror/language';
+import { EditorView } from '@codemirror/view';
 import { oneDark } from '@codemirror/theme-one-dark';
-import { yCollab } from 'y-codemirror.next';
+import { yCollab, ySyncAnnotation } from 'y-codemirror.next';
 import * as Y from 'yjs';
-import { initialCode } from '../../../shared/initialWorkspace.js';
+import { createInitialCode, initialCode } from '../../../shared/initialWorkspace.js';
 import { useCollaborativeRoom } from '../../hooks/useCollaborativeRoom.js';
+import EditorToolbarButton from './EditorToolbarButton.jsx';
+import PanelSplitter from './PanelSplitter.jsx';
+import QuickOpen from './QuickOpen.jsx';
 import './codeEditor.css';
 
 const initialFiles = [{ name: 'Main.java', source: initialCode }];
@@ -16,6 +22,16 @@ const apiUnavailableMessage =
 
 function workspaceStorageKey(userId, roomId) {
   return `devloop-workspace:${userId}:${roomId}`;
+}
+
+function readSharedFiles(document, fallbackFiles) {
+  if (!document) {
+    return fallbackFiles;
+  }
+  return [...document.getMap('files').entries()]
+    .filter((entry) => entry[1] instanceof Y.Text)
+    .map(([name, text]) => ({ name, source: text.toString() }))
+    .sort((first, second) => first.name.localeCompare(second.name));
 }
 
 function loadWorkspace(userId, roomId) {
@@ -83,13 +99,34 @@ function CodeEditor({ user }) {
   const [isProjectExpanded, setIsProjectExpanded] = useState(true);
   const [isOpenEditorsExpanded, setIsOpenEditorsExpanded] = useState(true);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
-  const [isMembersOpen, setIsMembersOpen] = useState(true);
+  const [isMembersOpen, setIsMembersOpen] = useState(() => window.innerWidth > 700);
+  const [isExplorerOpen, setIsExplorerOpen] = useState(() => window.innerWidth > 700);
+  const [isConsoleOpen, setIsConsoleOpen] = useState(true);
+  const [explorerWidth, setExplorerWidth] = useState(242);
+  const [membersWidth, setMembersWidth] = useState(264);
+  const [outputHeight, setOutputHeight] = useState(190);
+  const [isDarkTheme, setIsDarkTheme] = useState(true);
+  const [editorZoom, setEditorZoom] = useState(13);
+  const [cursorPosition, setCursorPosition] = useState({ line: 1, column: 1 });
+  const [quickOpen, setQuickOpen] = useState(false);
+  const [quickOpenQuery, setQuickOpenQuery] = useState('');
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchTarget, setSearchTarget] = useState(null);
+  const [dirtyFiles, setDirtyFiles] = useState(() => new Set());
+  const [toast, setToast] = useState('');
   const [inviteCopied, setInviteCopied] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [programInput, setProgramInput] = useState('');
   const [output, setOutput] = useState('');
   const [outputKind, setOutputKind] = useState('empty');
   const [requestError, setRequestError] = useState('');
+  const editorRef = useRef(null);
+  const appliedSearchTarget = useRef(null);
+  const toastTimer = useRef(null);
+  const cursorTimer = useRef(null);
+  const workspaceSyncTimer = useRef(null);
+  const workspaceRef = useRef(workspace);
 
   const activeFile = files.find((file) => file.name === activeFileName);
   const isFileOpen = Boolean(activeFile && openFiles.includes(activeFileName));
@@ -97,6 +134,61 @@ function CodeEditor({ user }) {
   const presenceError = collaboration.error;
   const sharedFiles = collaboration.document?.getMap('files');
   const activeSharedText = activeFile && sharedFiles?.get(activeFile.name);
+  const editorExtensions = useMemo(() => {
+    if (!(activeSharedText instanceof Y.Text) || !collaboration.awareness) {
+      return [java(), closeBrackets(), indentOnInput(), bracketMatching()];
+    }
+    return [
+      java(),
+      closeBrackets(),
+      indentOnInput(),
+      bracketMatching(),
+      yCollab(activeSharedText, collaboration.awareness),
+    ];
+  }, [activeSharedText, collaboration.awareness]);
+  const lightEditorTheme = useMemo(() => EditorView.theme({
+    '&': { color: '#282536', backgroundColor: '#fbfaff' },
+    '.cm-content': { caretColor: '#6d28d9' },
+    '.cm-cursor, .cm-dropCursor': { borderLeftColor: '#6d28d9' },
+    '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection': {
+      backgroundColor: '#ddd0f8',
+    },
+    '.cm-gutters': { color: '#858092', backgroundColor: '#f1eff6', borderRight: '1px solid #e0dce9' },
+    '.cm-activeLine': { backgroundColor: '#f3effb' },
+    '.cm-activeLineGutter': { color: '#4b4658', backgroundColor: '#ebe5f6' },
+  }, { dark: false }), []);
+  const searchResults = useMemo(() => {
+    const term = searchQuery.trim().toLowerCase();
+    if (!term) {
+      return [];
+    }
+    return files.flatMap((file) => file.source.split('\n').flatMap((line, index) => {
+      const column = line.toLowerCase().indexOf(term);
+      return column < 0
+        ? []
+        : [{ fileName: file.name, line: index + 1, column, text: line.trim() }];
+    }));
+  }, [files, searchQuery]);
+
+  const showToast = useCallback((message) => {
+    setToast(message);
+    window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(''), 2400);
+  }, []);
+
+  useEffect(() => {
+    workspaceRef.current = workspace;
+  }, [workspace]);
+
+  const resizeExplorer = useCallback((delta) => {
+    setExplorerWidth((width) => Math.max(180, Math.min(420, width + delta)));
+  }, []);
+  const resizeMembers = useCallback((delta) => {
+    setMembersWidth((width) => Math.max(210, Math.min(420, width - delta)));
+  }, []);
+  const resizeOutput = useCallback((delta) => {
+    setOutputHeight((height) => Math.max(110, Math.min(460, height - delta)));
+  }, []);
 
   useEffect(() => {
     if (collaboration.status !== 'connected' || !collaboration.document) {
@@ -106,9 +198,10 @@ function CodeEditor({ user }) {
     const document = collaboration.document;
     const roomFiles = document.getMap('files');
     const synchronizeWorkspace = () => {
+      window.clearTimeout(workspaceSyncTimer.current);
       if (roomFiles.size === 0) {
         document.transact(() => {
-          for (const file of workspace.files) {
+          for (const file of workspaceRef.current.files) {
             const text = new Y.Text();
             text.insert(0, file.source);
             roomFiles.set(file.name, text);
@@ -157,10 +250,20 @@ function CodeEditor({ user }) {
       });
     };
 
-    document.on('update', synchronizeWorkspace);
+    const scheduleWorkspaceSync = () => {
+      window.clearTimeout(workspaceSyncTimer.current);
+      workspaceSyncTimer.current = window.setTimeout(synchronizeWorkspace, 180);
+    };
+
+    document.on('update', scheduleWorkspaceSync);
+    roomFiles.observe(synchronizeWorkspace);
     synchronizeWorkspace();
-    return () => document.off('update', synchronizeWorkspace);
-  }, [collaboration.document, collaboration.status, workspace.files]);
+    return () => {
+      document.off('update', scheduleWorkspaceSync);
+      roomFiles.unobserve(synchronizeWorkspace);
+      window.clearTimeout(workspaceSyncTimer.current);
+    };
+  }, [collaboration.document, collaboration.status]);
 
   useEffect(() => {
     try {
@@ -170,12 +273,154 @@ function CodeEditor({ user }) {
     }
   }, [roomId, user.id, workspace]);
 
+  useEffect(() => {
+    function handleShortcut(event) {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey) {
+        return;
+      }
+      const key = event.key.toLowerCase();
+      if (key === 's') {
+        event.preventDefault();
+        try {
+          localStorage.setItem(
+            workspaceStorageKey(user.id, roomId),
+            JSON.stringify({
+              ...workspace,
+              files: readSharedFiles(collaboration.document, workspace.files),
+            }),
+          );
+          setDirtyFiles(new Set());
+          showToast('Workspace saved locally and synced to the room.');
+        } catch (error) {
+          console.error('Could not save the workspace locally:', error);
+          setRequestError(`Could not save the workspace: ${error.message}`);
+        }
+      } else if (key === 'p' && !event.shiftKey) {
+        event.preventDefault();
+        setQuickOpen(true);
+        setQuickOpenQuery('');
+      } else if (key === 'f' && event.shiftKey) {
+        event.preventDefault();
+        setSearchOpen(true);
+        setIsExplorerOpen(true);
+      }
+    }
+
+    window.addEventListener('keydown', handleShortcut);
+    return () => window.removeEventListener('keydown', handleShortcut);
+  }, [collaboration.document, roomId, showToast, user.id, workspace]);
+
+  useEffect(() => () => {
+    window.clearTimeout(toastTimer.current);
+    window.clearTimeout(cursorTimer.current);
+    window.clearTimeout(workspaceSyncTimer.current);
+  }, []);
+
+  useEffect(() => {
+    if (
+      !searchTarget ||
+      searchTarget.fileName !== activeFileName ||
+      appliedSearchTarget.current === searchTarget
+    ) {
+      return;
+    }
+    const view = editorRef.current?.view;
+    if (!view) {
+      return;
+    }
+    const targetFile = files.find((file) => file.name === searchTarget.fileName);
+    if (!targetFile) {
+      return;
+    }
+    const position = targetFile.source.split('\n')
+      .slice(0, searchTarget.line - 1)
+      .reduce((length, line) => length + line.length + 1, 0) + searchTarget.column;
+    view.dispatch({
+      selection: { anchor: position },
+      scrollIntoView: true,
+    });
+    view.focus();
+    appliedSearchTarget.current = searchTarget;
+  }, [activeFileName, files, searchTarget]);
+
   function openFile(name) {
     setWorkspace((current) => ({
       ...current,
       openFiles: current.openFiles.includes(name) ? current.openFiles : [...current.openFiles, name],
       activeFileName: name,
     }));
+  }
+
+  function refreshWorkspace() {
+    if (!collaboration.document) {
+      return;
+    }
+    const nextFiles = [...collaboration.document.getMap('files').entries()]
+      .filter((entry) => entry[1] instanceof Y.Text)
+      .map(([name, text]) => ({ name, source: text.toString() }))
+      .sort((first, second) => first.name.localeCompare(second.name));
+    if (nextFiles.length === 0) {
+      setRequestError('The shared workspace does not contain any Java files.');
+      return;
+    }
+    setWorkspace((current) => {
+      const availableNames = new Set(nextFiles.map((file) => file.name));
+      const nextOpenFiles = current.openFiles.filter((name) => availableNames.has(name));
+      const nextActiveFileName = availableNames.has(current.activeFileName)
+        ? current.activeFileName
+        : nextOpenFiles[nextOpenFiles.length - 1] || 'Main.java';
+      return { files: nextFiles, openFiles: nextOpenFiles, activeFileName: nextActiveFileName };
+    });
+    showToast('File list refreshed from the shared workspace.');
+  }
+
+  function handleEditorChange(_source, viewUpdate) {
+    const isRemoteChange = viewUpdate.transactions.some(
+      (transaction) => transaction.annotation(ySyncAnnotation) !== undefined,
+    );
+    if (isRemoteChange || !activeFileName) {
+      return;
+    }
+    setDirtyFiles((current) => {
+      if (current.has(activeFileName)) {
+        return current;
+      }
+      return new Set(current).add(activeFileName);
+    });
+  }
+
+  function handleEditorUpdate(viewUpdate) {
+    if (!viewUpdate.selectionSet) {
+      return;
+    }
+    const position = viewUpdate.state.selection.main.head;
+    const line = viewUpdate.state.doc.lineAt(position);
+    const nextPosition = { line: line.number, column: position - line.from + 1 };
+    window.clearTimeout(cursorTimer.current);
+    cursorTimer.current = window.setTimeout(() => {
+      setCursorPosition((current) =>
+        current.line === nextPosition.line && current.column === nextPosition.column
+          ? current
+          : nextPosition,
+      );
+    }, 100);
+  }
+
+  function selectSearchResult(result) {
+    openFile(result.fileName);
+    setSearchTarget(result);
+  }
+
+  async function toggleFullscreen() {
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        await document.documentElement.requestFullscreen();
+      }
+    } catch (error) {
+      setRequestError(`Could not change fullscreen mode: ${error.message}`);
+    }
   }
 
   function closeFile(name) {
@@ -218,15 +463,16 @@ function CodeEditor({ user }) {
       const className = name.slice(0, -'.java'.length);
       const newFile = {
         name,
-        source: `public class ${className} {\n}\n`,
+        source: createInitialCode(className),
       };
       const sharedText = new Y.Text();
       sharedText.insert(0, newFile.source);
       collaboration.document.getMap('files').set(name, sharedText);
       setWorkspace((current) => ({
         ...current,
-        files: [...current.files, newFile],
-        openFiles: [...current.openFiles, name],
+        openFiles: current.openFiles.includes(name)
+          ? current.openFiles
+          : [...current.openFiles, name],
         activeFileName: name,
       }));
     } else {
@@ -240,10 +486,18 @@ function CodeEditor({ user }) {
       });
       setWorkspace((current) => ({
         ...current,
-        files: current.files.map((file) => file.name === oldName ? { ...file, name } : file),
         openFiles: current.openFiles.map((openName) => openName === oldName ? name : openName),
         activeFileName: current.activeFileName === oldName ? name : current.activeFileName,
       }));
+      setDirtyFiles((current) => {
+        if (!current.has(oldName)) {
+          return current;
+        }
+        const next = new Set(current);
+        next.delete(oldName);
+        next.add(name);
+        return next;
+      });
     }
 
     setFileAction(null);
@@ -265,26 +519,23 @@ function CodeEditor({ user }) {
 
     setWorkspace((current) => {
       const nextOpenFiles = current.openFiles.filter((openName) => openName !== name);
-      const nextFiles = current.files.filter((file) => file.name !== name);
       return {
         ...current,
-        files: nextFiles,
         openFiles: nextOpenFiles,
         activeFileName: current.activeFileName === name
           ? nextOpenFiles[nextOpenFiles.length - 1] || 'Main.java'
           : current.activeFileName,
       };
     });
+    setDirtyFiles((current) => {
+      if (!current.has(name)) {
+        return current;
+      }
+      const next = new Set(current);
+      next.delete(name);
+      return next;
+    });
     collaboration.document.getMap('files').delete(name);
-  }
-
-  function updateSource(source) {
-    setWorkspace((current) => ({
-      ...current,
-      files: current.files.map((file) =>
-        file.name === current.activeFileName ? { ...file, source } : file,
-      ),
-    }));
   }
 
   async function runCode() {
@@ -298,7 +549,10 @@ function CodeEditor({ user }) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
-        body: JSON.stringify({ sourceFiles: files, input: programInput }),
+        body: JSON.stringify({
+          sourceFiles: readSharedFiles(collaboration.document, files),
+          input: programInput,
+        }),
       });
       const contentType = response.headers.get('content-type') || '';
       if (!contentType.includes('application/json')) {
@@ -378,12 +632,29 @@ function CodeEditor({ user }) {
   const displayName = user.username ? `@${user.username}` : `${user.firstName} ${user.lastName}`;
 
   return (
-    <main className="workbench">
+    <main className={`workbench${isDarkTheme ? '' : ' theme-light'}`}>
       <header className="workbench-topbar">
         <a className="workbench-brand" href="/" aria-label="DevLoop home">
           <span className="brand-mark">D</span>
           <span>DevLoop</span>
         </a>
+        <div className="layout-actions" aria-label="Workspace panels">
+          <EditorToolbarButton
+            active={isExplorerOpen}
+            icon="explorer"
+            label={`${isExplorerOpen ? 'Hide' : 'Show'} file explorer`}
+            onClick={() => setIsExplorerOpen((open) => !open)}
+          />
+          <EditorToolbarButton
+            active={searchOpen}
+            icon="search"
+            label="Search across files (Ctrl+Shift+F)"
+            onClick={() => {
+              setSearchOpen((open) => !open);
+              setIsExplorerOpen(true);
+            }}
+          />
+        </div>
         <div className="workspace-title">
           <span className="workspace-title-label">WORKSPACE</span>
           <strong>{roomId}</strong>
@@ -402,6 +673,22 @@ function CodeEditor({ user }) {
             Members
             <span className="members-count">{members.length}</span>
           </button>
+          <EditorToolbarButton
+            active={isConsoleOpen}
+            icon="terminal"
+            label={`${isConsoleOpen ? 'Hide' : 'Show'} output console`}
+            onClick={() => setIsConsoleOpen((open) => !open)}
+          />
+          <EditorToolbarButton
+            icon={isDarkTheme ? 'sun' : 'moon'}
+            label={`Switch to ${isDarkTheme ? 'light' : 'dark'} theme`}
+            onClick={() => setIsDarkTheme((dark) => !dark)}
+          />
+          <EditorToolbarButton
+            icon="fullscreen"
+            label="Toggle fullscreen"
+            onClick={toggleFullscreen}
+          />
           <button
             className="add-member-button"
             onClick={() => navigate('/meetings', { state: { returnRoomId: roomId } })}
@@ -462,6 +749,9 @@ function CodeEditor({ user }) {
             >
               <span aria-hidden="true" className="file-icon file-icon-java">J</span>
               <span className="file-tab-name">{name}</span>
+              {dirtyFiles.has(name) && (
+                <span aria-label="Unsaved changes" className="file-tab-dirty" title="Unsaved changes" />
+              )}
             </button>
             <button
               aria-label={`Close ${name}`}
@@ -483,21 +773,64 @@ function CodeEditor({ user }) {
         </span>
       </nav>
 
-      <div className="workbench-body">
+      <div
+        className="workbench-body"
+        style={{
+          '--explorer-width': `${explorerWidth}px`,
+          '--members-width': `${membersWidth}px`,
+          '--output-height': `${outputHeight}px`,
+          '--editor-font-size': `${editorZoom}px`,
+        }}
+      >
+        {isExplorerOpen && (
+          <>
         <aside aria-label="Project files" className="file-explorer">
           <div className="panel-heading">
             <span>EXPLORER</span>
-            <button
-              aria-label="Create Java file"
-              className="explorer-add-file"
-              onClick={() => startFileAction('create')}
-              title="Create Java file"
-              disabled={collaboration.status !== 'connected'}
-              type="button"
-            >
-              +
-            </button>
+            <div className="explorer-toolbar">
+              <EditorToolbarButton
+                disabled={collaboration.status !== 'connected'}
+                icon="refresh"
+                label="Refresh file list"
+                onClick={refreshWorkspace}
+              />
+              <button
+                aria-label="Create Java file"
+                className="explorer-add-file"
+                onClick={() => startFileAction('create')}
+                title="Create Java file"
+                disabled={collaboration.status !== 'connected'}
+                type="button"
+              >
+                +
+              </button>
+            </div>
           </div>
+          {searchOpen && (
+            <section aria-label="Search across files" className="workspace-search">
+              <label className="visually-hidden" htmlFor="workspace-search-input">Search in files</label>
+              <input
+                id="workspace-search-input"
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder="Search in files…"
+                value={searchQuery}
+              />
+              <span className="search-result-count">{searchResults.length} results</span>
+              <div className="workspace-search-results">
+                {searchResults.map((result) => (
+                  <button
+                    key={`${result.fileName}:${result.line}:${result.column}`}
+                    onClick={() => selectSearchResult(result)}
+                    type="button"
+                  >
+                    <strong>{result.fileName}:{result.line}</strong>
+                    <span>{result.text}</span>
+                  </button>
+                ))}
+                {searchQuery && searchResults.length === 0 && <p>No matches found.</p>}
+              </div>
+            </section>
+          )}
           <section aria-label="Open editors" className="explorer-section">
             <button
               aria-expanded={isOpenEditorsExpanded}
@@ -590,15 +923,54 @@ function CodeEditor({ user }) {
             )}
           </section>
           <div className="explorer-hint">
-            Files save in this browser. Main.java is the run entry point; keep its public class name in sync when renaming other files.
+            Ctrl+P opens files · Ctrl+Shift+F searches the workspace
           </div>
         </aside>
+        <PanelSplitter label="file explorer width" onResize={resizeExplorer} orientation="vertical" />
+          </>
+        )}
 
         <section aria-label="Java workspace" className="editor-stage">
           <section aria-label="Java code editor" className="code-panel">
             <div className="panel-heading code-panel-heading">
-              <span>{isFileOpen ? activeFile.name : 'No file open'}</span>
-              {isFileOpen && <span className="language-label">Java</span>}
+              <div className="editor-file-heading">
+                <span>{isFileOpen ? activeFile.name : 'No file open'}</span>
+                {isFileOpen && <span className="language-label">Java</span>}
+              </div>
+              <div className="editor-tools" aria-label="Editor controls">
+                <span className="editor-zoom-label">Zoom</span>
+                <EditorToolbarButton
+                  icon="minus"
+                  label="Decrease editor text size"
+                  onClick={() => setEditorZoom((zoom) => Math.max(10, zoom - 1))}
+                />
+                <span className="editor-zoom-value">{editorZoom}px</span>
+                <EditorToolbarButton
+                  icon="plus"
+                  label="Increase editor text size"
+                  onClick={() => setEditorZoom((zoom) => Math.min(22, zoom + 1))}
+                />
+                <EditorToolbarButton
+                  icon="save"
+                  label="Save workspace (Ctrl+S)"
+                  onClick={() => {
+                    try {
+                      localStorage.setItem(
+                        workspaceStorageKey(user.id, roomId),
+                        JSON.stringify({
+                          ...workspace,
+                          files: readSharedFiles(collaboration.document, workspace.files),
+                        }),
+                      );
+                      setDirtyFiles(new Set());
+                      showToast('Workspace saved locally and synced to the room.');
+                    } catch (error) {
+                      console.error('Could not save the workspace locally:', error);
+                      setRequestError(`Could not save the workspace: ${error.message}`);
+                    }
+                  }}
+                />
+              </div>
             </div>
             {isFileOpen && collaboration.status === 'connected' && activeSharedText instanceof Y.Text ? (
               <div className="code-editor-wrap">
@@ -610,11 +982,14 @@ function CodeEditor({ user }) {
                     lineNumbers: true,
                   }}
                   className="java-code-editor"
-                  extensions={[java(), yCollab(activeSharedText, collaboration.awareness)]}
+                  extensions={editorExtensions}
                   height="100%"
-                  onChange={updateSource}
-                  theme={oneDark}
-                  value={activeFile.source}
+                  key={activeFile.name}
+                  onChange={handleEditorChange}
+                  onUpdate={handleEditorUpdate}
+                  ref={editorRef}
+                  theme={isDarkTheme ? oneDark : lightEditorTheme}
+                  value={activeSharedText.toString()}
                 />
               </div>
             ) : collaboration.status !== 'connected' ? (
@@ -640,6 +1015,7 @@ function CodeEditor({ user }) {
               <span>Java</span>
               <span>UTF-8</span>
               <span>{activeFile ? activeFile.source.split('\n').length : 0} lines</span>
+              <span>Ln {cursorPosition.line}, Col {cursorPosition.column}</span>
             </div>
           </section>
 
@@ -653,11 +1029,23 @@ function CodeEditor({ user }) {
             />
           </section>
 
+          {isConsoleOpen && (
+            <>
+          <PanelSplitter label="output console height" onResize={resizeOutput} orientation="horizontal" />
           <section aria-label="Program output" className="output-panel">
             <div className="panel-heading output-heading">
               <span><span className={`output-status output-status-${outputKind}`} /> OUTPUT</span>
               <div className="output-actions">
                 {isRunning && <span className="running-label">Compiling and running…</span>}
+                <button
+                  className="clear-console"
+                  disabled={isRunning || !output}
+                  onClick={runCode}
+                  title="Run Java again"
+                  type="button"
+                >
+                  Rerun
+                </button>
                 <button
                   className="clear-console"
                   disabled={isRunning || !output}
@@ -675,9 +1063,13 @@ function CodeEditor({ user }) {
               {isRunning ? 'Compiling Java project…' : output || 'Run your Java program to see output here.'}
             </pre>
           </section>
+            </>
+          )}
           {requestError && <p className="workbench-error" role="alert">{requestError}</p>}
         </section>
         {isMembersOpen && (
+          <>
+          <PanelSplitter label="members panel width" onResize={resizeMembers} orientation="vertical" />
           <aside aria-label="Meeting members" className="members-sidebar">
             <div className="members-sidebar-heading">
               <div>
@@ -725,6 +1117,7 @@ function CodeEditor({ user }) {
             )}
             <p className="members-sync-note">Members and code sync live while they’re in this room.</p>
           </aside>
+          </>
         )}
       </div>
 
@@ -735,8 +1128,25 @@ function CodeEditor({ user }) {
         </span>
         <span>{isFileOpen ? activeFile.name : 'No file open'}</span>
         <span>Java</span>
+        <span>Ln {cursorPosition.line}, Col {cursorPosition.column}</span>
+        <span className={collaboration.status === 'connected' ? 'statusbar-sync is-synced' : 'statusbar-sync'}>
+          {collaboration.status === 'connected' ? 'Synced' : collaboration.status}
+        </span>
         <span>DevLoop Editor</span>
       </footer>
+      {quickOpen && (
+        <QuickOpen
+          files={files}
+          onClose={() => setQuickOpen(false)}
+          onSelect={(name) => {
+            openFile(name);
+            setQuickOpen(false);
+          }}
+          query={quickOpenQuery}
+          setQuery={setQuickOpenQuery}
+        />
+      )}
+      {toast && <div aria-live="polite" className="workspace-toast" role="status">{toast}</div>}
     </main>
   );
 }
