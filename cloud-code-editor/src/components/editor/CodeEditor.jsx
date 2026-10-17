@@ -3,17 +3,16 @@ import { useNavigate, useParams } from 'react-router-dom';
 import CodeMirror from '@uiw/react-codemirror';
 import { java } from '@codemirror/lang-java';
 import { oneDark } from '@codemirror/theme-one-dark';
+import { yCollab } from 'y-codemirror.next';
+import * as Y from 'yjs';
+import { initialCode } from '../../../shared/initialWorkspace.js';
+import { useCollaborativeRoom } from '../../hooks/useCollaborativeRoom.js';
 import './codeEditor.css';
 
-const initialCode = `public class Main {
-    public static void main(String[] args) {
-        System.out.println("Hello, DevLoop!");
-    }
-}`;
 const initialFiles = [{ name: 'Main.java', source: initialCode }];
 
 const apiUnavailableMessage =
-  'The authentication API is unavailable. Run "npm run dev:api" and make sure MongoDB is running.';
+  'The API is unavailable. Run "npm run dev" and make sure MongoDB is running.';
 
 function workspaceStorageKey(userId, roomId) {
   return `devloop-workspace:${userId}:${roomId}`;
@@ -76,6 +75,7 @@ function CodeEditor({ user }) {
   const navigate = useNavigate();
   const { roomId } = useParams();
   const [workspace, setWorkspace] = useState(() => loadWorkspace(user.id, roomId));
+  const collaboration = useCollaborativeRoom(roomId, user);
   const { files, openFiles, activeFileName } = workspace;
   const [fileAction, setFileAction] = useState(null);
   const [fileNameDraft, setFileNameDraft] = useState('');
@@ -84,8 +84,7 @@ function CodeEditor({ user }) {
   const [isOpenEditorsExpanded, setIsOpenEditorsExpanded] = useState(true);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [isMembersOpen, setIsMembersOpen] = useState(true);
-  const [members, setMembers] = useState([]);
-  const [presenceError, setPresenceError] = useState('');
+  const [inviteCopied, setInviteCopied] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [programInput, setProgramInput] = useState('');
   const [output, setOutput] = useState('');
@@ -94,45 +93,74 @@ function CodeEditor({ user }) {
 
   const activeFile = files.find((file) => file.name === activeFileName);
   const isFileOpen = Boolean(activeFile && openFiles.includes(activeFileName));
+  const members = collaboration.members;
+  const presenceError = collaboration.error;
+  const sharedFiles = collaboration.document?.getMap('files');
+  const activeSharedText = activeFile && sharedFiles?.get(activeFile.name);
 
   useEffect(() => {
-    let isCurrent = true;
-    const controller = new AbortController();
-
-    async function refreshPresence() {
-      try {
-        const response = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/presence`, {
-          method: 'PUT',
-          credentials: 'same-origin',
-          signal: controller.signal,
-        });
-        const result = await response.json();
-        if (response.status === 401) {
-          navigate('/', { replace: true, state: { notice: 'Please log in to stay in this meeting.' } });
-          return;
-        }
-        if (!response.ok) {
-          throw new Error(result.error || `The server returned ${response.status}.`);
-        }
-        if (isCurrent) {
-          setMembers(result.members);
-          setPresenceError('');
-        }
-      } catch (error) {
-        if (isCurrent && error.name !== 'AbortError') {
-          setPresenceError(`Could not update meeting members: ${error.message}`);
-        }
-      }
+    if (collaboration.status !== 'connected' || !collaboration.document) {
+      return undefined;
     }
 
-    refreshPresence();
-    const intervalId = window.setInterval(refreshPresence, 10_000);
-    return () => {
-      isCurrent = false;
-      controller.abort();
-      window.clearInterval(intervalId);
+    const document = collaboration.document;
+    const roomFiles = document.getMap('files');
+    const synchronizeWorkspace = () => {
+      if (roomFiles.size === 0) {
+        document.transact(() => {
+          for (const file of workspace.files) {
+            const text = new Y.Text();
+            text.insert(0, file.source);
+            roomFiles.set(file.name, text);
+          }
+        });
+        return;
+      }
+
+      const nextFiles = [...roomFiles.entries()]
+        .filter((entry) => entry[1] instanceof Y.Text)
+        .map(([name, text]) => ({ name, source: text.toString() }))
+        .sort((first, second) => first.name.localeCompare(second.name));
+      if (nextFiles.length === 0) {
+        return;
+      }
+
+      setWorkspace((current) => {
+        const availableNames = new Set(nextFiles.map((file) => file.name));
+        const nextOpenFiles = current.openFiles.filter((name) => availableNames.has(name));
+        if (nextOpenFiles.length === 0) {
+          nextOpenFiles.push('Main.java');
+        }
+        const nextActiveFileName = availableNames.has(current.activeFileName) &&
+          nextOpenFiles.includes(current.activeFileName)
+          ? current.activeFileName
+          : nextOpenFiles[0];
+        const filesUnchanged = current.files.length === nextFiles.length &&
+          current.files.every((file, index) =>
+            file.name === nextFiles[index].name && file.source === nextFiles[index].source,
+          );
+        const openFilesUnchanged = current.openFiles.length === nextOpenFiles.length &&
+          current.openFiles.every((name, index) => name === nextOpenFiles[index]);
+        if (
+          filesUnchanged &&
+          openFilesUnchanged &&
+          current.activeFileName === nextActiveFileName
+        ) {
+          return current;
+        }
+
+        return {
+          files: nextFiles,
+          openFiles: nextOpenFiles,
+          activeFileName: nextActiveFileName,
+        };
+      });
     };
-  }, [navigate, roomId]);
+
+    document.on('update', synchronizeWorkspace);
+    synchronizeWorkspace();
+    return () => document.off('update', synchronizeWorkspace);
+  }, [collaboration.document, collaboration.status, workspace.files]);
 
   useEffect(() => {
     try {
@@ -171,6 +199,10 @@ function CodeEditor({ user }) {
 
   function saveFileAction(event) {
     event.preventDefault();
+    if (collaboration.status !== 'connected' || !collaboration.document) {
+      setFileActionError('Wait for the room to connect before changing files.');
+      return;
+    }
     const name = fileNameDraft.trim();
     const error = getFileNameError(name, files, fileAction.currentName);
     if (error) {
@@ -188,6 +220,9 @@ function CodeEditor({ user }) {
         name,
         source: `public class ${className} {\n}\n`,
       };
+      const sharedText = new Y.Text();
+      sharedText.insert(0, newFile.source);
+      collaboration.document.getMap('files').set(name, sharedText);
       setWorkspace((current) => ({
         ...current,
         files: [...current.files, newFile],
@@ -196,6 +231,13 @@ function CodeEditor({ user }) {
       }));
     } else {
       const oldName = fileAction.currentName;
+      const oldText = collaboration.document.getMap('files').get(oldName);
+      const renamedText = new Y.Text();
+      renamedText.insert(0, oldText.toString());
+      collaboration.document.transact(() => {
+        collaboration.document.getMap('files').delete(oldName);
+        collaboration.document.getMap('files').set(name, renamedText);
+      });
       setWorkspace((current) => ({
         ...current,
         files: current.files.map((file) => file.name === oldName ? { ...file, name } : file),
@@ -211,6 +253,10 @@ function CodeEditor({ user }) {
 
   function deleteFile(name) {
     if (name === 'Main.java') {
+      return;
+    }
+    if (collaboration.status !== 'connected' || !collaboration.document) {
+      setFileActionError('Wait for the room to connect before changing files.');
       return;
     }
     if (!window.confirm(`Delete ${name}? This cannot be undone.`)) {
@@ -229,6 +275,7 @@ function CodeEditor({ user }) {
           : current.activeFileName,
       };
     });
+    collaboration.document.getMap('files').delete(name);
   }
 
   function updateSource(source) {
@@ -318,6 +365,16 @@ function CodeEditor({ user }) {
     }
   }
 
+  async function copyInviteLink() {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      setInviteCopied(true);
+      window.setTimeout(() => setInviteCopied(false), 2000);
+    } catch (error) {
+      setRequestError(`Could not copy the invite link: ${error.message}`);
+    }
+  }
+
   const displayName = user.username ? `@${user.username}` : `${user.firstName} ${user.lastName}`;
 
   return (
@@ -331,6 +388,9 @@ function CodeEditor({ user }) {
           <span className="workspace-title-label">WORKSPACE</span>
           <strong>{roomId}</strong>
         </div>
+        <span className={`room-connection-status is-${collaboration.status}`} role="status">
+          {collaboration.status === 'connected' ? 'Live' : collaboration.status}
+        </span>
         <div className="workbench-actions">
           <button
             aria-expanded={isMembersOpen}
@@ -350,7 +410,15 @@ function CodeEditor({ user }) {
             <span aria-hidden="true">+</span>
             Add member
           </button>
-          <button className="run-button" disabled={isRunning} onClick={runCode} type="button">
+          <button className="invite-link-button" onClick={copyInviteLink} type="button">
+            {inviteCopied ? 'Link copied' : 'Copy invite link'}
+          </button>
+          <button
+            className="run-button"
+            disabled={isRunning || collaboration.status !== 'connected'}
+            onClick={runCode}
+            type="button"
+          >
             <span aria-hidden="true">{isRunning ? '◌' : '▶'}</span>
             {isRunning ? 'Running…' : 'Run Java'}
           </button>
@@ -410,7 +478,9 @@ function CodeEditor({ user }) {
           </div>
         ))}
         <span className="file-tabs-spacer" />
-        <span className="save-indicator"><span /> Local workspace</span>
+        <span className="save-indicator">
+          <span />{collaboration.status === 'connected' ? 'Synced to room' : 'Connecting to room'}
+        </span>
       </nav>
 
       <div className="workbench-body">
@@ -422,6 +492,7 @@ function CodeEditor({ user }) {
               className="explorer-add-file"
               onClick={() => startFileAction('create')}
               title="Create Java file"
+              disabled={collaboration.status !== 'connected'}
               type="button"
             >
               +
@@ -481,6 +552,7 @@ function CodeEditor({ user }) {
                           aria-label={`Rename ${file.name}`}
                           onClick={() => startFileAction('rename', file.name)}
                           title={`Rename ${file.name}`}
+                          disabled={collaboration.status !== 'connected'}
                           type="button"
                         >
                           ✎
@@ -489,6 +561,7 @@ function CodeEditor({ user }) {
                           aria-label={`Delete ${file.name}`}
                           onClick={() => deleteFile(file.name)}
                           title={`Delete ${file.name}`}
+                          disabled={collaboration.status !== 'connected'}
                           type="button"
                         >
                           ×
@@ -527,7 +600,7 @@ function CodeEditor({ user }) {
               <span>{isFileOpen ? activeFile.name : 'No file open'}</span>
               {isFileOpen && <span className="language-label">Java</span>}
             </div>
-            {isFileOpen ? (
+            {isFileOpen && collaboration.status === 'connected' && activeSharedText instanceof Y.Text ? (
               <div className="code-editor-wrap">
                 <CodeMirror
                   aria-label={`Edit ${activeFile.name}`}
@@ -537,12 +610,21 @@ function CodeEditor({ user }) {
                     lineNumbers: true,
                   }}
                   className="java-code-editor"
-                  extensions={[java()]}
+                  extensions={[java(), yCollab(activeSharedText, collaboration.awareness)]}
                   height="100%"
                   onChange={updateSource}
                   theme={oneDark}
                   value={activeFile.source}
                 />
+              </div>
+            ) : collaboration.status !== 'connected' ? (
+              <div className="closed-editor-state">
+                <p>{presenceError || 'Connecting to the shared workspace…'}</p>
+                {collaboration.status === 'error' && (
+                  <button className="open-file-button" onClick={() => navigate('/meetings')} type="button">
+                    Choose another room
+                  </button>
+                )}
               </div>
             ) : (
               <div className="closed-editor-state">
@@ -614,6 +696,9 @@ function CodeEditor({ user }) {
             </div>
             <p className="members-room-label">IN THIS ROOM</p>
             {presenceError && <p className="members-error" role="alert">{presenceError}</p>}
+            {collaboration.activity && (
+              <p aria-live="polite" className="members-activity">{collaboration.activity}</p>
+            )}
             {members.length > 0 ? (
               <ul className="members-list">
                 {members.map((member) => {
@@ -638,13 +723,16 @@ function CodeEditor({ user }) {
             ) : (
               <p className="members-empty">Connecting to this room…</p>
             )}
-            <p className="members-sync-note">Members refresh automatically while they’re in this room.</p>
+            <p className="members-sync-note">Members and code sync live while they’re in this room.</p>
           </aside>
         )}
       </div>
 
       <footer className="workbench-statusbar">
-        <span><span className="statusbar-check">✓</span> Ready</span>
+        <span>
+          <span className="statusbar-check">{collaboration.status === 'connected' ? '✓' : '◌'}</span>
+          {collaboration.status === 'connected' ? 'Connected' : 'Connecting'}
+        </span>
         <span>{isFileOpen ? activeFile.name : 'No file open'}</span>
         <span>Java</span>
         <span>DevLoop Editor</span>

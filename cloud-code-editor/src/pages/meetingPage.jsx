@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { v4 as uuidv4 } from 'uuid';
 import './meetingPage.css';
 
 function MeetingPage({ user }) {
@@ -8,6 +7,7 @@ function MeetingPage({ user }) {
   const navigate = useNavigate();
   const [roomId, setRoomId] = useState('');
   const [error, setError] = useState('');
+  const [isCreating, setIsCreating] = useState(false);
   const displayName = user.username ? `@${user.username}` : `${user.firstName} ${user.lastName}`;
   const returnRoomId = location.state?.returnRoomId;
 
@@ -22,9 +22,30 @@ function MeetingPage({ user }) {
     navigate(`/editor/${encodeURIComponent(room)}`);
   }
 
-  function createMeeting() {
-    setRoomId(uuidv4());
+  async function createMeeting() {
+    setIsCreating(true);
     setError('');
+    try {
+      const response = await fetch('/api/rooms', {
+        method: 'POST',
+        credentials: 'same-origin',
+      });
+      const contentType = response.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        throw new Error(`The server returned an invalid response (HTTP ${response.status}).`);
+      }
+
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.error || `The server returned ${response.status}.`);
+      }
+
+      navigate(`/editor/${encodeURIComponent(result.roomId)}`);
+    } catch (requestError) {
+      setError(`Could not create a room: ${requestError.message}`);
+    } finally {
+      setIsCreating(false);
+    }
   }
 
   return (
@@ -77,9 +98,14 @@ function MeetingPage({ user }) {
               <h2>Start a new meeting</h2>
               <p>Create a fresh room and invite your collaborators.</p>
             </div>
-            <button className="meeting-create-button" onClick={createMeeting} type="button">
+            <button
+              className="meeting-create-button"
+              disabled={isCreating}
+              onClick={createMeeting}
+              type="button"
+            >
               <span aria-hidden="true">+</span>
-              Create new meeting
+              {isCreating ? 'Creating room…' : 'Create new meeting'}
             </button>
           </div>
         </div>

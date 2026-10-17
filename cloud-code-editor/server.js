@@ -1,6 +1,9 @@
 import 'dotenv/config';
+import { createServer } from 'node:http';
 import mongoose from 'mongoose';
+import { Server as SocketServer } from 'socket.io';
 import { createApp } from './server/app.js';
+import { registerCollaborationHandlers } from './server/sockets/collaboration.js';
 
 const port = 3001;
 
@@ -19,9 +22,12 @@ async function startServer() {
   await mongoose.connect(mongoUri);
   console.log('Connected to MongoDB.');
 
-  const app = createApp();
-  app.listen(port, '127.0.0.1', () => {
-    console.log(`Auth API listening at http://127.0.0.1:${port}`);
+  const server = createServer(createApp());
+  const io = new SocketServer(server, { maxHttpBufferSize: 1024 * 1024 });
+  registerCollaborationHandlers(io);
+
+  server.listen(port, '127.0.0.1', () => {
+    console.log(`DevLoop API and collaboration server listening at http://127.0.0.1:${port}`);
   });
 }
 

@@ -8,6 +8,7 @@
     "dev:api": "node server.js",
     "build": "vite build",
     "lint": "oxlint",
+    "test": "node --test",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -23,7 +24,11 @@
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-router-dom": "^7.18.4",
-    "uuid": "^14.0.3"
+    "socket.io": "^4.8.4",
+    "socket.io-client": "^4.8.4",
+    "y-codemirror.next": "^0.3.6",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.33"
   },
   "devDependencies": {
     "@types/react": "^19.2.18",

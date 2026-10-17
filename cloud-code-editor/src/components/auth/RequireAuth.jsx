@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 
 function RequireAuth({ children }) {
+  const location = useLocation();
   const navigate = useNavigate();
   const [status, setStatus] = useState('checking');
   const [error, setError] = useState('');
@@ -20,7 +21,10 @@ function RequireAuth({ children }) {
         if (response.status === 401) {
           navigate('/', {
             replace: true,
-            state: { notice: 'Please log in to open the editor.' },
+            state: {
+              notice: 'Please log in to open this page.',
+              from: location.pathname,
+            },
           });
           return;
         }
@@ -42,7 +46,7 @@ function RequireAuth({ children }) {
 
     verifySession();
     return () => controller.abort();
-  }, [navigate]);
+  }, [location.pathname, navigate]);
 
   if (status === 'authenticated') {
     return <>{children(user)}</>;

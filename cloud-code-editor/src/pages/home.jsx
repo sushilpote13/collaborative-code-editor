@@ -68,7 +68,11 @@ function Home() {
         return;
       }
 
-      navigate('/editor/demo-room', { replace: true });
+      const requestedPage = location.state?.from;
+      const destination = typeof requestedPage === 'string' && requestedPage.startsWith('/editor/')
+        ? requestedPage
+        : '/meetings';
+      navigate(destination, { replace: true });
     } catch (error) {
       setNotice(`Could not reach the authentication server: ${error.message}`);
     } finally {

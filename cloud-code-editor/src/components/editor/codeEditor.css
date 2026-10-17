@@ -87,6 +87,16 @@
   white-space: nowrap;
 }
 
+.room-connection-status {
+  color: #9693a2;
+  font-size: 10px;
+  text-transform: capitalize;
+}
+
+.room-connection-status.is-connected {
+  color: #54d39a;
+}
+
 .workbench-actions {
   display: flex;
   align-items: center;
@@ -161,6 +171,22 @@
   color: #c084fc;
   font-size: 17px;
   line-height: 1;
+}
+
+.invite-link-button {
+  min-height: 33px;
+  padding: 0 10px;
+  border: 1px solid #393644;
+  border-radius: 7px;
+  color: #ded7eb !important;
+  background: #1b1a22;
+  cursor: pointer;
+  font-size: 11px !important;
+}
+
+.invite-link-button:hover {
+  border-color: #8955b8;
+  background: #24202d;
 }
 
 .run-button {
@@ -497,6 +523,13 @@
 
 .members-error {
   color: #fca5a5;
+}
+
+.members-activity {
+  margin: 8px 14px;
+  color: #c084fc;
+  font-size: 10px;
+  line-height: 1.5;
 }
 
 .members-sync-note {
@@ -1102,6 +1135,12 @@
     font-size: 11px !important;
   }
 
+  .invite-link-button {
+    min-height: 30px;
+    padding-inline: 6px;
+    font-size: 10px !important;
+  }
+
   .profile-trigger-name {
     max-width: 88px;
   }
@@ -1164,6 +1203,15 @@
     gap: 3px;
     padding-inline: 6px;
     font-size: 10px !important;
+  }
+
+  .room-connection-status {
+    display: none;
+  }
+
+  .invite-link-button {
+    padding-inline: 4px;
+    font-size: 9px !important;
   }
 
   .profile-trigger {
