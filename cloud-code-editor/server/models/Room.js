@@ -15,7 +15,7 @@ const roomSchema = new mongoose.Schema(
     },
     state: {
       type: Buffer,
-      required: true,
+      required: false,
     },
   },
   { timestamps: true },

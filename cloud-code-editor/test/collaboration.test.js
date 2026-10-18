@@ -37,8 +37,9 @@ function emitWithAck(socket, eventName, payload) {
   return new Promise((resolve) => socket.emit(eventName, payload, resolve));
 }
 
-async function startTestServer() {
-  const roomId = `room-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+async function startTestServer({ roomId: existingRoomId, projectFiles: existingProjectFiles } = {}) {
+  const roomId = existingRoomId
+    ?? `room-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const isolatedRoomId = `other-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const users = new Map([
     ['user-one', {
@@ -56,6 +57,8 @@ async function startTestServer() {
   ]);
   const room = { roomId, state: createRoomState() };
   const isolatedRoom = { roomId: isolatedRoomId, state: createRoomState() };
+  const legacyRoomState = Buffer.from(room.state);
+  const projectFiles = existingProjectFiles ?? new Map();
   const rooms = new Map([
     [room.roomId, room],
     [isolatedRoom.roomId, isolatedRoom],
@@ -70,19 +73,51 @@ async function startTestServer() {
     async findOne({ roomId: requestedRoomId }) {
       return rooms.get(requestedRoomId) ?? null;
     },
-    async updateOne({ roomId: requestedRoomId }, { $set }) {
-      const requestedRoom = rooms.get(requestedRoomId);
-      if (requestedRoom) {
-        requestedRoom.state = $set.state;
-        persistenceWaiter?.resolve();
-        persistenceWaiter = null;
+  };
+  const storage = {
+    async loadProjectFiles({ roomId: requestedRoomId }) {
+      return projectFiles.get(requestedRoomId) ?? [];
+    },
+    async listProjectFiles({ roomId: requestedRoomId }) {
+      return (projectFiles.get(requestedRoomId) ?? []).map((file) => ({
+        name: file.name,
+        size: Buffer.byteLength(file.source, 'utf8'),
+      }));
+    },
+    async replaceProjectFiles({ roomId: requestedRoomId, files }) {
+      projectFiles.set(requestedRoomId, files.map((file) => ({ ...file })));
+      persistenceWaiter?.resolve();
+      persistenceWaiter = null;
+    },
+    async saveProjectFile({ roomId: requestedRoomId, fileName, source }) {
+      const files = projectFiles.get(requestedRoomId) ?? [];
+      const index = files.findIndex((file) => file.name === fileName);
+      if (index >= 0) {
+        files[index] = { name: fileName, source };
+      } else {
+        files.push({ name: fileName, source });
       }
+      projectFiles.set(requestedRoomId, files);
+    },
+    async loadProjectFile({ roomId: requestedRoomId, fileName }) {
+      const file = (projectFiles.get(requestedRoomId) ?? [])
+        .find((entry) => entry.name === fileName);
+      if (!file) {
+        const error = new Error('Missing object');
+        error.name = 'NoSuchKey';
+        throw error;
+      }
+      return file.source;
+    },
+    async deleteProjectFile({ roomId: requestedRoomId, fileName }) {
+      projectFiles.set(requestedRoomId, (projectFiles.get(requestedRoomId) ?? [])
+        .filter((file) => file.name !== fileName));
     },
   };
 
   const httpServer = createServer();
   const socketServer = new SocketServer(httpServer);
-  registerCollaborationHandlers(socketServer, { RoomModel, UserModel });
+  registerCollaborationHandlers(socketServer, { RoomModel, UserModel, storage });
   await new Promise((resolve) => httpServer.listen(0, '127.0.0.1', resolve));
   const { port } = httpServer.address();
 
@@ -102,6 +137,8 @@ async function startTestServer() {
     room,
     roomId,
     isolatedRoomId,
+    projectFiles,
+    legacyRoomState,
     url: `http://127.0.0.1:${port}`,
     waitForPersistence() {
       return new Promise((resolve, reject) => {
@@ -315,8 +352,41 @@ test('authenticated room members receive Yjs updates and leave notifications', a
     firstDocument.destroy();
     latestJoiner.disconnect();
 
+    const restartedServer = await startTestServer({
+      roomId: server.roomId,
+      projectFiles: server.projectFiles,
+    });
+    const restartedClient = restartedServer.connect('user-one');
+    try {
+      await waitForEvent(restartedClient, 'connect');
+      const restartedJoin = await emitWithAck(
+        restartedClient,
+        'room:join',
+        { roomId: server.roomId },
+      );
+      assert.equal(restartedJoin.ok, true);
+      const restartedDocument = new Y.Doc();
+      Y.applyUpdate(restartedDocument, Buffer.from(restartedJoin.state, 'base64'));
+      assert.match(
+        restartedDocument.getMap('files').get('Main.java').toString(),
+        /\/\/ concurrent from second/,
+      );
+      assert.match(
+        restartedDocument.getMap('files').get('Helper.java').toString(),
+        /\/\/ helper-only update/,
+      );
+      restartedDocument.destroy();
+    } finally {
+      restartedClient.disconnect();
+      await restartedServer.close();
+    }
+
     const persistedDocument = new Y.Doc();
-    Y.applyUpdate(persistedDocument, server.room.state);
+    for (const file of server.projectFiles.get(server.roomId)) {
+      const text = new Y.Text();
+      text.insert(0, file.source);
+      persistedDocument.getMap('files').set(file.name, text);
+    }
     assert.match(
       persistedDocument.getMap('files').get('Main.java').toString(),
       /\/\/ reverse shared update/,
@@ -333,6 +403,7 @@ test('authenticated room members receive Yjs updates and leave notifications', a
       persistedDocument.getMap('files').get('Helper.java').toString(),
       /\/\/ helper-only update/,
     );
+    assert.deepEqual(server.room.state, server.legacyRoomState);
 
     const leftNotice = waitForEvent(first, 'room:participant-left');
     second.disconnect();

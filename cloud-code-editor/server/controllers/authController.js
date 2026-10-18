@@ -43,95 +43,107 @@ function validateEmailAndPassword(email, password) {
   );
 }
 
-export async function signup(request, response) {
-  const { firstName, lastName, username, email, password } = request.body ?? {};
+export function createAuthController({ UserModel = User } = {}) {
+  async function signup(request, response) {
+    const { firstName, lastName, username, email, password } = request.body ?? {};
 
-  if (
-    typeof firstName !== 'string' ||
-    !firstName.trim() ||
-    firstName.trim().length > 80 ||
-    typeof lastName !== 'string' ||
-    !lastName.trim() ||
-    lastName.trim().length > 80 ||
-    !validUsername(username) ||
-    !validateEmailAndPassword(email, password)
-  ) {
-    return response.status(400).json({
-      error: 'Enter your first and last name, a username (3-20 letters, numbers, or underscores, starting with a letter), valid email, and a password of 8-72 bytes.',
-    });
-  }
-
-  try {
-    const user = await User.create({
-      firstName: firstName.trim(),
-      lastName: lastName.trim(),
-      username: username.trim().toLowerCase(),
-      email: email.trim().toLowerCase(),
-      passwordHash: await bcrypt.hash(password, 12),
-    });
-
-    setAuthCookie(response, user._id);
-    return response.status(201).json({ user: publicUser(user) });
-  } catch (error) {
-    if (error.code === 11000) {
-      if (error.keyPattern?.username || error.keyValue?.username) {
-        return response.status(409).json({
-          code: 'USERNAME_TAKEN',
-          error: 'That username is already taken. Please choose another.',
-        });
-      }
-
-      return response.status(409).json({
-        code: 'ACCOUNT_EXISTS',
-        error: 'An account with this email already exists. Please log in.',
+    if (
+      typeof firstName !== 'string' ||
+      !firstName.trim() ||
+      firstName.trim().length > 80 ||
+      typeof lastName !== 'string' ||
+      !lastName.trim() ||
+      lastName.trim().length > 80 ||
+      !validUsername(username) ||
+      !validateEmailAndPassword(email, password)
+    ) {
+      return response.status(400).json({
+        error: 'Enter your first and last name, a username (3-20 letters, numbers, or underscores, starting with a letter), valid email, and a password of 8-72 bytes.',
       });
     }
-    throw error;
+
+    try {
+      const user = await UserModel.create({
+        firstName: firstName.trim(),
+        lastName: lastName.trim(),
+        username: username.trim().toLowerCase(),
+        email: email.trim().toLowerCase(),
+        passwordHash: await bcrypt.hash(password, 12),
+      });
+
+      setAuthCookie(response, user._id);
+      return response.status(201).json({ user: publicUser(user) });
+    } catch (error) {
+      if (error.code === 11000) {
+        if (error.keyPattern?.username || error.keyValue?.username) {
+          return response.status(409).json({
+            code: 'USERNAME_TAKEN',
+            error: 'That username is already taken. Please choose another.',
+          });
+        }
+
+        return response.status(409).json({
+          code: 'ACCOUNT_EXISTS',
+          error: 'An account with this email already exists. Please log in.',
+        });
+      }
+      throw error;
+    }
   }
-}
 
-export async function login(request, response) {
-  const { email, password } = request.body ?? {};
+  async function login(request, response) {
+    const { email, password } = request.body ?? {};
 
-  if (!validateEmailAndPassword(email, password)) {
-    return response.status(400).json({
-      error: 'Enter a valid email and a password of 8-72 bytes.',
+    if (!validateEmailAndPassword(email, password)) {
+      return response.status(400).json({
+        error: 'Enter a valid email and a password of 8-72 bytes.',
+      });
+    }
+
+    const user = await UserModel.findOne({ email: email.trim().toLowerCase() }).select('+passwordHash');
+    if (!user) {
+      return response.status(404).json({
+        code: 'ACCOUNT_NOT_FOUND',
+        error: 'No account was found with this email.',
+      });
+    }
+
+    const passwordMatches = await bcrypt.compare(password, user.passwordHash);
+    if (!passwordMatches) {
+      return response.status(401).json({ error: 'The email or password is incorrect.' });
+    }
+
+    setAuthCookie(response, user._id);
+    return response.status(200).json({ user: publicUser(user) });
+  }
+
+  async function currentUser(request, response) {
+    const user = await UserModel.findById(request.auth.userId);
+    if (!user) {
+      response.clearCookie('authToken', { path: '/' });
+      return response.status(401).json({ error: 'Please log in to continue.' });
+    }
+
+    return response.status(200).json({ user: publicUser(user) });
+  }
+
+  function logout(_request, response) {
+    response.clearCookie('authToken', {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: process.env.NODE_ENV === 'production',
+      path: '/',
     });
+    return response.status(200).json({ loggedOut: true });
   }
 
-  const user = await User.findOne({ email: email.trim().toLowerCase() }).select('+passwordHash');
-  if (!user) {
-    return response.status(404).json({
-      code: 'ACCOUNT_NOT_FOUND',
-      error: 'No account was found with this email.',
-    });
-  }
-
-  const passwordMatches = await bcrypt.compare(password, user.passwordHash);
-  if (!passwordMatches) {
-    return response.status(401).json({ error: 'The email or password is incorrect.' });
-  }
-
-  setAuthCookie(response, user._id);
-  return response.status(200).json({ user: publicUser(user) });
+  return { currentUser, login, logout, signup };
 }
 
-export async function currentUser(request, response) {
-  const user = await User.findById(request.auth.userId);
-  if (!user) {
-    response.clearCookie('authToken', { path: '/' });
-    return response.status(401).json({ error: 'Please log in to continue.' });
-  }
-
-  return response.status(200).json({ user: publicUser(user) });
-}
-
-export function logout(_request, response) {
-  response.clearCookie('authToken', {
-    httpOnly: true,
-    sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production',
-    path: '/',
-  });
-  return response.status(200).json({ loggedOut: true });
-}
+const defaultAuthController = createAuthController();
+export const {
+  currentUser,
+  login,
+  logout,
+  signup,
+} = defaultAuthController;

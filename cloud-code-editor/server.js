@@ -19,8 +19,11 @@ async function startServer() {
     throw new Error('JWT_SECRET must be set to a random value of at least 32 characters.');
   }
 
-  await mongoose.connect(mongoUri);
-  console.log('Connected to MongoDB.');
+  await mongoose.connect(mongoUri, {
+    ...(process.env.MONGODB_TLS === 'true' ? { tls: true } : {}),
+    ...(process.env.MONGODB_TLS_CA_FILE ? { tlsCAFile: process.env.MONGODB_TLS_CA_FILE } : {}),
+  });
+  console.log('Connected to the configured MongoDB-compatible database.');
 
   const server = createServer(createApp());
   const io = new SocketServer(server, { maxHttpBufferSize: 1024 * 1024 });
@@ -32,6 +35,6 @@ async function startServer() {
 }
 
 startServer().catch((error) => {
-  console.error('Could not start the auth API:', error.message);
+  console.error('Could not start the DevLoop server:', error.message);
   process.exitCode = 1;
 });

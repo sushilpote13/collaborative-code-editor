@@ -6,6 +6,7 @@ import {
   connectRoomMember,
   disconnectRoomMember,
 } from '../services/roomPresence.js';
+import { s3Storage } from '../services/s3Storage.js';
 
 const roomIdPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{2,39}$/;
 const fileNamePattern = /^[A-Za-z][A-Za-z0-9_]{0,59}\.java$/;
@@ -62,7 +63,7 @@ function validWorkspace(document) {
 
 export function registerCollaborationHandlers(
   io,
-  { RoomModel = Room, UserModel = User } = {},
+  { RoomModel = Room, UserModel = User, storage = s3Storage } = {},
 ) {
   const documents = new Map();
   const pendingWrites = new Map();
@@ -109,15 +110,43 @@ export function registerCollaborationHandlers(
     }
 
     const document = new Y.Doc();
-    if (room.state) {
-      Y.applyUpdate(document, new Uint8Array(room.state), 'database');
-    }
-    if (!validWorkspace(document)) {
+    try {
+      const files = await storage.loadProjectFiles({ roomId: room.roomId });
+      if (files.length > 0) {
+        for (const file of files) {
+          const text = new Y.Text();
+          text.insert(0, file.source);
+          document.getMap('files').set(file.name, text);
+        }
+      } else if (room.state) {
+        Y.applyUpdate(document, new Uint8Array(room.state), 'database');
+        if (!validWorkspace(document)) {
+          throw new Error('The legacy room workspace is invalid.');
+        }
+        const legacyFiles = [...document.getMap('files').entries()]
+          .map(([name, text]) => ({ name, source: text.toString() }));
+        await storage.replaceProjectFiles({ roomId: room.roomId, files: legacyFiles });
+        const migratedFiles = await storage.loadProjectFiles({ roomId: room.roomId });
+        if (
+          migratedFiles.length !== legacyFiles.length ||
+          migratedFiles.some((file) =>
+            !legacyFiles.some((legacyFile) =>
+              legacyFile.name === file.name && legacyFile.source === file.source,
+            ),
+          )
+        ) {
+          throw new Error('The legacy room workspace could not be verified in S3.');
+        }
+      }
+      if (!validWorkspace(document)) {
+        throw new Error('The room workspace is invalid.');
+      }
+      documents.set(room.roomId, document);
+      return document;
+    } catch (error) {
       document.destroy();
-      throw new Error('The room workspace is invalid.');
+      throw error;
     }
-    documents.set(room.roomId, document);
-    return document;
   }
 
   function scheduleRoomPersistence(roomId, document) {
@@ -132,17 +161,20 @@ export function registerCollaborationHandlers(
       }
       persistenceTimers.delete(roomId);
 
-      const state = Buffer.from(Y.encodeStateAsUpdate(document));
+      const files = [...document.getMap('files').entries()]
+        .map(([name, text]) => ({ name, source: text.toString() }));
       const previousWrite = pendingWrites.get(roomId) ?? Promise.resolve();
       const write = previousWrite
-        .catch(() => {})
-        .then(() => RoomModel.updateOne({ roomId }, { $set: { state } }));
+        .catch((error) => {
+          console.error('A previous S3 workspace write failed:', error);
+        })
+        .then(() => storage.replaceProjectFiles({ roomId, files }));
       pendingWrites.set(roomId, write);
       write
         .catch((error) => {
-          console.error('Could not persist the collaboration workspace:', error);
+          console.error('Could not persist the collaboration workspace to S3:', error);
           io.to(roomId).emit('room:error', {
-            error: 'The latest workspace change could not be saved to MongoDB.',
+            error: 'The latest workspace change could not be saved to S3.',
           });
         })
         .finally(() => {

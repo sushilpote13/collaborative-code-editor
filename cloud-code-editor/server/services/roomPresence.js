@@ -82,3 +82,8 @@ export function listRoomMembers(roomId, now = Date.now()) {
     }))
     .sort((first, second) => first.joinedAt - second.joinedAt);
 }
+
+export function isRoomMember(roomId, userId) {
+  removeExpiredMembers();
+  return rooms.get(roomId)?.get(userId)?.socketIds.size > 0;
+}

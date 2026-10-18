@@ -5,11 +5,16 @@ import { initialCode } from '../../shared/initialWorkspace.js';
 import Room from '../models/Room.js';
 import User from '../models/User.js';
 import { requireAuth } from '../middleware/requireAuth.js';
+import { s3Storage } from '../services/s3Storage.js';
 import { updateRoomMember } from '../services/roomPresence.js';
 
 const roomIdPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{2,39}$/;
 
-export function createRoomRouter({ RoomModel = Room, UserModel = User } = {}) {
+export function createRoomRouter({
+  RoomModel = Room,
+  UserModel = User,
+  storage = s3Storage,
+} = {}) {
   const roomRouter = Router();
 
   roomRouter.post('/', requireAuth, async (request, response, next) => {
@@ -25,14 +30,29 @@ export function createRoomRouter({ RoomModel = Room, UserModel = User } = {}) {
       mainFile.insert(0, initialCode);
       document.getMap('files').set('Main.java', mainFile);
 
-      const room = await RoomModel.create({
-        roomId,
-        createdBy: user._id,
-        state: Buffer.from(Y.encodeStateAsUpdate(document)),
-      });
-      document.destroy();
+      try {
+        const initialFiles = [{ name: 'Main.java', source: initialCode }];
+        await storage.replaceProjectFiles({
+          roomId,
+          files: initialFiles,
+        });
+        const verifiedFiles = await storage.loadProjectFiles({ roomId });
+        if (
+          verifiedFiles.length !== initialFiles.length ||
+          verifiedFiles[0].name !== initialFiles[0].name ||
+          verifiedFiles[0].source !== initialFiles[0].source
+        ) {
+          throw new Error('The new project file could not be verified in S3.');
+        }
+        const room = await RoomModel.create({
+          roomId,
+          createdBy: user._id,
+        });
+        return response.status(201).json({ roomId: room.roomId });
+      } finally {
+        document.destroy();
+      }
 
-      return response.status(201).json({ roomId: room.roomId });
     } catch (error) {
       return next(error);
     }

@@ -34,16 +34,17 @@ function readSharedFiles(document, fallbackFiles) {
     .sort((first, second) => first.name.localeCompare(second.name));
 }
 
-function loadWorkspace(userId, roomId) {
+function readLegacyWorkspace(userId, roomId) {
   try {
     const saved = localStorage.getItem(workspaceStorageKey(userId, roomId));
     if (!saved) {
-      return { files: initialFiles, openFiles: ['Main.java'], activeFileName: 'Main.java' };
+      return null;
     }
 
     const workspace = JSON.parse(saved);
     const names = new Set();
     const validFiles = Array.isArray(workspace.files) && workspace.files.length > 0
+      && workspace.files.length <= 20
       && workspace.files.every((file) => {
         if (
           !file ||
@@ -54,26 +55,28 @@ function loadWorkspace(userId, roomId) {
         ) {
           return false;
         }
+        if (new TextEncoder().encode(file.source).byteLength > 32 * 1024) {
+          return false;
+        }
         names.add(file.name.toLowerCase());
         return true;
       });
 
-    if (!validFiles || !workspace.files.some((file) => file.name === 'Main.java')) {
-      return { files: initialFiles, openFiles: ['Main.java'], activeFileName: 'Main.java' };
+    const totalBytes = validFiles
+      ? workspace.files.reduce((total, file) => total + new TextEncoder().encode(file.source).byteLength, 0)
+      : Infinity;
+    if (
+      !validFiles ||
+      totalBytes > 128 * 1024 ||
+      !workspace.files.some((file) => file.name === 'Main.java')
+    ) {
+      throw new Error('The saved browser workspace is invalid or exceeds project limits.');
     }
 
-    const fileNames = new Set(workspace.files.map((file) => file.name));
-    const openFiles = Array.isArray(workspace.openFiles)
-      ? [...new Set(workspace.openFiles.filter((name) => fileNames.has(name)))]
-      : ['Main.java'];
-    const activeFileName = fileNames.has(workspace.activeFileName) &&
-      openFiles.includes(workspace.activeFileName)
-      ? workspace.activeFileName
-      : openFiles[0] || null;
-    return { files: workspace.files, openFiles, activeFileName };
+    return workspace.files;
   } catch (error) {
-    console.error('Could not load the saved workspace:', error);
-    return { files: initialFiles, openFiles: ['Main.java'], activeFileName: 'Main.java' };
+    console.error('Could not migrate the saved browser workspace:', error);
+    throw error;
   }
 }
 
@@ -90,7 +93,11 @@ function getFileNameError(name, files, currentName = null) {
 function CodeEditor({ user }) {
   const navigate = useNavigate();
   const { roomId } = useParams();
-  const [workspace, setWorkspace] = useState(() => loadWorkspace(user.id, roomId));
+  const [workspace, setWorkspace] = useState({
+    files: initialFiles,
+    openFiles: ['Main.java'],
+    activeFileName: 'Main.java',
+  });
   const collaboration = useCollaborativeRoom(roomId, user);
   const { files, openFiles, activeFileName } = workspace;
   const [fileAction, setFileAction] = useState(null);
@@ -117,6 +124,7 @@ function CodeEditor({ user }) {
   const [toast, setToast] = useState('');
   const [inviteCopied, setInviteCopied] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
+  const [isCloudFileActionPending, setIsCloudFileActionPending] = useState(false);
   const [programInput, setProgramInput] = useState('');
   const [output, setOutput] = useState('');
   const [outputKind, setOutputKind] = useState('empty');
@@ -127,6 +135,7 @@ function CodeEditor({ user }) {
   const cursorTimer = useRef(null);
   const workspaceSyncTimer = useRef(null);
   const workspaceRef = useRef(workspace);
+  const migratedLegacyWorkspace = useRef(null);
 
   const activeFile = files.find((file) => file.name === activeFileName);
   const isFileOpen = Boolean(activeFile && openFiles.includes(activeFileName));
@@ -175,6 +184,38 @@ function CodeEditor({ user }) {
     window.clearTimeout(toastTimer.current);
     toastTimer.current = window.setTimeout(() => setToast(''), 2400);
   }, []);
+
+  const saveWorkspaceToS3 = useCallback(async () => {
+    if (collaboration.status !== 'connected' || !collaboration.document) {
+      setRequestError('Wait for the room to connect before saving the project to S3.');
+      return;
+    }
+    setIsCloudFileActionPending(true);
+    setRequestError('');
+    try {
+      const response = await fetch(
+        `/api/projects/${encodeURIComponent(roomId)}/files`,
+        {
+          method: 'PUT',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            files: readSharedFiles(collaboration.document, workspaceRef.current.files),
+          }),
+        },
+      );
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.error || `The server returned ${response.status}.`);
+      }
+      setDirtyFiles(new Set());
+      showToast(`Workspace saved to S3. ${result.files.length} Java files are available across devices.`);
+    } catch (error) {
+      setRequestError(`Could not save the workspace to S3: ${error.message}`);
+    } finally {
+      setIsCloudFileActionPending(false);
+    }
+  }, [collaboration.document, collaboration.status, roomId, showToast]);
 
   useEffect(() => {
     workspaceRef.current = workspace;
@@ -266,14 +307,6 @@ function CodeEditor({ user }) {
   }, [collaboration.document, collaboration.status]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(workspaceStorageKey(user.id, roomId), JSON.stringify(workspace));
-    } catch (error) {
-      console.error('Could not save the workspace locally:', error);
-    }
-  }, [roomId, user.id, workspace]);
-
-  useEffect(() => {
     function handleShortcut(event) {
       if (!(event.ctrlKey || event.metaKey) || event.altKey) {
         return;
@@ -281,20 +314,7 @@ function CodeEditor({ user }) {
       const key = event.key.toLowerCase();
       if (key === 's') {
         event.preventDefault();
-        try {
-          localStorage.setItem(
-            workspaceStorageKey(user.id, roomId),
-            JSON.stringify({
-              ...workspace,
-              files: readSharedFiles(collaboration.document, workspace.files),
-            }),
-          );
-          setDirtyFiles(new Set());
-          showToast('Workspace saved locally and synced to the room.');
-        } catch (error) {
-          console.error('Could not save the workspace locally:', error);
-          setRequestError(`Could not save the workspace: ${error.message}`);
-        }
+        void saveWorkspaceToS3();
       } else if (key === 'p' && !event.shiftKey) {
         event.preventDefault();
         setQuickOpen(true);
@@ -308,7 +328,113 @@ function CodeEditor({ user }) {
 
     window.addEventListener('keydown', handleShortcut);
     return () => window.removeEventListener('keydown', handleShortcut);
-  }, [collaboration.document, roomId, showToast, user.id, workspace]);
+  }, [saveWorkspaceToS3]);
+
+  useEffect(() => {
+    if (collaboration.status !== 'connected' || !collaboration.document) {
+      return;
+    }
+
+    const migrationKey = `${user.id}:${roomId}`;
+    if (migratedLegacyWorkspace.current === migrationKey) {
+      return;
+    }
+    migratedLegacyWorkspace.current = migrationKey;
+
+    async function migrateLegacyWorkspace() {
+      const storageKey = workspaceStorageKey(user.id, roomId);
+      let legacyFiles;
+      try {
+        legacyFiles = readLegacyWorkspace(user.id, roomId);
+      } catch (error) {
+        setRequestError(`Could not migrate this browser's saved workspace: ${error.message}`);
+        return;
+      }
+      if (!legacyFiles) {
+        return;
+      }
+
+      const baseUrl = `/api/projects/${encodeURIComponent(roomId)}/files`;
+      let replaceConflicts = null;
+      let hasConflicts = false;
+      try {
+        const listResponse = await fetch(baseUrl, { credentials: 'same-origin' });
+        const listResult = await listResponse.json();
+        if (!listResponse.ok) {
+          throw new Error(listResult.error || `The server returned ${listResponse.status}.`);
+        }
+        const cloudNames = new Set(listResult.files.map((file) => file.name));
+
+        for (const file of legacyFiles) {
+          const fileUrl = `${baseUrl}/${encodeURIComponent(file.name)}`;
+          let cloudSource = null;
+          if (cloudNames.has(file.name)) {
+            const loadResponse = await fetch(fileUrl, { credentials: 'same-origin' });
+            const loadedFile = await loadResponse.json();
+            if (!loadResponse.ok) {
+              throw new Error(loadedFile.error || `The server returned ${loadResponse.status}.`);
+            }
+            cloudSource = loadedFile.source;
+          }
+
+          if (cloudSource !== null && cloudSource !== file.source) {
+            if (replaceConflicts === null) {
+              replaceConflicts = window.confirm(
+                'This browser has saved Java files that differ from S3. Replace the matching S3 files with this browser backup? The backup will be kept unless every file is verified.',
+              );
+            }
+            if (!replaceConflicts) {
+              hasConflicts = true;
+              continue;
+            }
+          }
+          if (cloudSource !== file.source) {
+            const saveResponse = await fetch(fileUrl, {
+              method: 'PUT',
+              credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ source: file.source }),
+            });
+            const saveResult = await saveResponse.json();
+            if (!saveResponse.ok) {
+              throw new Error(saveResult.error || `The server returned ${saveResponse.status}.`);
+            }
+            const verifyResponse = await fetch(fileUrl, { credentials: 'same-origin' });
+            const verifiedFile = await verifyResponse.json();
+            if (!verifyResponse.ok || verifiedFile.source !== file.source) {
+              throw new Error(`S3 verification failed for ${file.name}.`);
+            }
+          }
+
+          const roomFiles = collaboration.document.getMap('files');
+          const sharedText = roomFiles.get(file.name);
+          if (sharedText instanceof Y.Text) {
+            if (sharedText.toString() !== file.source) {
+              sharedText.delete(0, sharedText.length);
+              if (file.source) {
+                sharedText.insert(0, file.source);
+              }
+            }
+          } else {
+            const text = new Y.Text();
+            text.insert(0, file.source);
+            roomFiles.set(file.name, text);
+          }
+        }
+
+        if (hasConflicts) {
+          setRequestError('Some browser backup files differ from S3 and were not migrated. The backup remains on this device.');
+          return;
+        }
+        localStorage.removeItem(storageKey);
+        showToast('The previous browser workspace was verified in S3 and removed from this device.');
+      } catch (error) {
+        setRequestError(`Could not migrate the browser workspace to S3: ${error.message}`);
+      }
+    }
+
+    void migrateLegacyWorkspace();
+  }, [collaboration.document, collaboration.status, roomId, showToast, user.id]);
 
   useEffect(() => () => {
     window.clearTimeout(toastTimer.current);
@@ -351,7 +477,7 @@ function CodeEditor({ user }) {
     }));
   }
 
-  function refreshWorkspace() {
+  async function refreshWorkspace() {
     if (!collaboration.document) {
       return;
     }
@@ -371,7 +497,19 @@ function CodeEditor({ user }) {
         : nextOpenFiles[nextOpenFiles.length - 1] || 'Main.java';
       return { files: nextFiles, openFiles: nextOpenFiles, activeFileName: nextActiveFileName };
     });
-    showToast('File list refreshed from the shared workspace.');
+    try {
+      const response = await fetch(
+        `/api/projects/${encodeURIComponent(roomId)}/files`,
+        { credentials: 'same-origin' },
+      );
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.error || `The server returned ${response.status}.`);
+      }
+      showToast(`File list refreshed. ${result.files.length} project files are saved in S3.`);
+    } catch (error) {
+      setRequestError(`Could not refresh the S3 file list: ${error.message}`);
+    }
   }
 
   function handleEditorChange(_source, viewUpdate) {
@@ -517,25 +655,76 @@ function CodeEditor({ user }) {
       return;
     }
 
-    setWorkspace((current) => {
-      const nextOpenFiles = current.openFiles.filter((openName) => openName !== name);
-      return {
-        ...current,
-        openFiles: nextOpenFiles,
-        activeFileName: current.activeFileName === name
-          ? nextOpenFiles[nextOpenFiles.length - 1] || 'Main.java'
-          : current.activeFileName,
-      };
-    });
-    setDirtyFiles((current) => {
-      if (!current.has(name)) {
-        return current;
+    void (async () => {
+      try {
+        const response = await fetch(
+          `/api/projects/${encodeURIComponent(roomId)}/files/${encodeURIComponent(name)}`,
+          { method: 'DELETE', credentials: 'same-origin' },
+        );
+        if (!response.ok) {
+          const result = await response.json();
+          throw new Error(result.error || `The server returned ${response.status}.`);
+        }
+        setWorkspace((current) => {
+          const nextOpenFiles = current.openFiles.filter((openName) => openName !== name);
+          return {
+            ...current,
+            openFiles: nextOpenFiles,
+            activeFileName: current.activeFileName === name
+              ? nextOpenFiles[nextOpenFiles.length - 1] || 'Main.java'
+              : current.activeFileName,
+          };
+        });
+        setDirtyFiles((current) => {
+          if (!current.has(name)) {
+            return current;
+          }
+          const next = new Set(current);
+          next.delete(name);
+          return next;
+        });
+        collaboration.document.getMap('files').delete(name);
+      } catch (error) {
+        setRequestError(`Could not delete ${name}: ${error.message}`);
       }
-      const next = new Set(current);
-      next.delete(name);
-      return next;
-    });
-    collaboration.document.getMap('files').delete(name);
+    })();
+  }
+
+  async function loadActiveFileFromS3() {
+    if (!activeFile || !(activeSharedText instanceof Y.Text)) {
+      return;
+    }
+
+    setIsCloudFileActionPending(true);
+    setRequestError('');
+    try {
+      const response = await fetch(
+        `/api/projects/${encodeURIComponent(roomId)}/files/${encodeURIComponent(activeFile.name)}`,
+        { credentials: 'same-origin' },
+      );
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.error || `The server returned ${response.status}.`);
+      }
+      if (typeof result.source !== 'string') {
+        throw new Error('The saved project file response is invalid.');
+      }
+      if (!window.confirm(`Load ${activeFile.name} from S3 and replace its shared contents?`)) {
+        return;
+      }
+
+      collaboration.document.transact(() => {
+        activeSharedText.delete(0, activeSharedText.length);
+        if (result.source.length > 0) {
+          activeSharedText.insert(0, result.source);
+        }
+      });
+      showToast(`${activeFile.name} loaded from S3 and synced to the room.`);
+    } catch (error) {
+      setRequestError(`Could not load ${activeFile.name} from S3: ${error.message}`);
+    } finally {
+      setIsCloudFileActionPending(false);
+    }
   }
 
   async function runCode() {
@@ -952,23 +1141,15 @@ function CodeEditor({ user }) {
                 />
                 <EditorToolbarButton
                   icon="save"
-                  label="Save workspace (Ctrl+S)"
-                  onClick={() => {
-                    try {
-                      localStorage.setItem(
-                        workspaceStorageKey(user.id, roomId),
-                        JSON.stringify({
-                          ...workspace,
-                          files: readSharedFiles(collaboration.document, workspace.files),
-                        }),
-                      );
-                      setDirtyFiles(new Set());
-                      showToast('Workspace saved locally and synced to the room.');
-                    } catch (error) {
-                      console.error('Could not save the workspace locally:', error);
-                      setRequestError(`Could not save the workspace: ${error.message}`);
-                    }
-                  }}
+                  label="Save workspace to S3 (Ctrl+S)"
+                  disabled={collaboration.status !== 'connected' || isCloudFileActionPending}
+                  onClick={saveWorkspaceToS3}
+                />
+                <EditorToolbarButton
+                  disabled={!isFileOpen || collaboration.status !== 'connected' || isCloudFileActionPending}
+                  icon="download"
+                  label="Load active file from S3"
+                  onClick={loadActiveFileFromS3}
                 />
               </div>
             </div>

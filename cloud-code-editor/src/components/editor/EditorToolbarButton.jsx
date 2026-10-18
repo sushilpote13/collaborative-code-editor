@@ -9,6 +9,7 @@ const iconPaths = {
   refresh: <><path d="M20 7v5h-5" /><path d="M4 17v-5h5" /><path d="M5.6 9a7 7 0 0 1 11.6-2L20 12M4 12l2.8 5a7 7 0 0 0 11.6-2" /></>,
   minus: <path d="M5 12h14" />,
   plus: <><path d="M12 5v14" /><path d="M5 12h14" /></>,
+  download: <><path d="M12 4v12m0 0 5-5m-5 5-5-5" /><path d="M4 16.5V20h16v-3.5" /></>,
   save: <><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z" /><path d="M17 21v-8H7v8M7 3v5h8" /></>,
 };
 

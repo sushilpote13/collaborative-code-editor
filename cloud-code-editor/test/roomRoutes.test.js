@@ -4,7 +4,7 @@ import test from 'node:test';
 import cookieParser from 'cookie-parser';
 import express from 'express';
 import jwt from 'jsonwebtoken';
-import * as Y from 'yjs';
+import { handleApiError } from '../server/app.js';
 import { createRoomRouter } from '../server/routes/roomRoutes.js';
 import { createInitialCode, initialCode } from '../shared/initialWorkspace.js';
 
@@ -24,6 +24,7 @@ test('workspace starters use the runnable DevLoop greeting and match each Java f
 test('authenticated room creation stores a seeded Yjs workspace', async () => {
   process.env.JWT_SECRET = jwtSecret;
   let createdRoom;
+  let uploadedFiles;
   const user = {
     _id: { toString: () => 'room-owner' },
     username: 'room_owner',
@@ -41,10 +42,18 @@ test('authenticated room creation stores a seeded Yjs workspace', async () => {
       return room;
     },
   };
+  const storage = {
+    async replaceProjectFiles(project) {
+      uploadedFiles = project;
+    },
+    async loadProjectFiles() {
+      return uploadedFiles.files;
+    },
+  };
 
   const app = express();
   app.use(cookieParser());
-  app.use('/api/rooms', createRoomRouter({ RoomModel, UserModel }));
+  app.use('/api/rooms', createRoomRouter({ RoomModel, UserModel, storage }));
   const server = createServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
@@ -59,11 +68,11 @@ test('authenticated room creation stores a seeded Yjs workspace', async () => {
     assert.equal(response.status, 201);
     assert.match(result.roomId, /^[A-Fa-f0-9-]{36}$/);
     assert.equal(createdRoom.createdBy, user._id);
-
-    const document = new Y.Doc();
-    Y.applyUpdate(document, createdRoom.state);
-    assert.equal(document.getMap('files').get('Main.java').toString(), expectedStarterCode);
-    document.destroy();
+    assert.equal(createdRoom.state, undefined);
+    assert.deepEqual(uploadedFiles, {
+      roomId: result.roomId,
+      files: [{ name: 'Main.java', source: expectedStarterCode }],
+    });
   } finally {
     await new Promise((resolve, reject) => {
       server.close((error) => (error ? reject(error) : resolve()));
@@ -77,6 +86,10 @@ test('room creation rejects a request without the authentication cookie', async 
   app.use('/api/rooms', createRoomRouter({
     RoomModel: { create: async () => assert.fail('Unauthenticated room creation must not persist a room.') },
     UserModel: { findById: () => assert.fail('Unauthenticated room creation must not look up a user.') },
+    storage: {
+      replaceProjectFiles: async () => assert.fail('Unauthenticated room creation must not upload files.'),
+      loadProjectFiles: async () => assert.fail('Unauthenticated room creation must not load files.'),
+    },
   }));
   const server = createServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -85,6 +98,57 @@ test('room creation rejects a request without the authentication cookie', async 
   try {
     const response = await fetch(`http://127.0.0.1:${port}/api/rooms`, { method: 'POST' });
     assert.equal(response.status, 401);
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+});
+
+test('room creation reports unavailable S3 credentials without creating an incomplete room', async () => {
+  process.env.JWT_SECRET = jwtSecret;
+  const user = { _id: { toString: () => 'room-owner' } };
+  let roomCreated = false;
+  const app = express();
+  app.use(cookieParser());
+  app.use('/api/rooms', createRoomRouter({
+    RoomModel: {
+      async create() {
+        roomCreated = true;
+      },
+    },
+    UserModel: {
+      findById() {
+        return { select: async () => user };
+      },
+    },
+    storage: {
+      async replaceProjectFiles() {
+        throw Object.assign(new Error('Could not load credentials from any providers'), {
+          name: 'CredentialsProviderError',
+        });
+      },
+      async loadProjectFiles() {
+        assert.fail('S3 verification should not run after the upload fails.');
+      },
+    },
+  }));
+  app.use(handleApiError);
+  const server = createServer(app);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  const token = jwt.sign({}, jwtSecret, { subject: 'room-owner', expiresIn: '1h' });
+
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/api/rooms`, {
+      method: 'POST',
+      headers: { cookie: `authToken=${token}` },
+    });
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), {
+      error: 'Cloud file storage is unavailable. Configure AWS credentials and S3 access for the server.',
+    });
+    assert.equal(roomCreated, false);
   } finally {
     await new Promise((resolve, reject) => {
       server.close((error) => (error ? reject(error) : resolve()));
