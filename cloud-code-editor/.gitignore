@@ -14,6 +14,7 @@ dist-ssr
 .env
 .env.*
 !.env.example
+.env.example
 
 # Local diagnostic scripts that print environment values
 *.probe-*.mjs
