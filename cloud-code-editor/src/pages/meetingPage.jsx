@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { apiFetch } from '../lib/cognito.js';
 import './meetingPage.css';
 
 function MeetingPage({ user }) {
@@ -26,18 +27,20 @@ function MeetingPage({ user }) {
     setIsCreating(true);
     setError('');
     try {
-      const response = await fetch('/api/rooms', {
+      const response = await apiFetch('/api/rooms', {
         method: 'POST',
-        credentials: 'same-origin',
       });
       const contentType = response.headers.get('content-type') || '';
-      if (!contentType.includes('application/json')) {
-        throw new Error(`The server returned an invalid response (HTTP ${response.status}).`);
+      let result = null;
+      if (contentType.includes('application/json')) {
+        result = await response.json();
       }
 
-      const result = await response.json();
       if (!response.ok) {
-        throw new Error(result.error || `The server returned ${response.status}.`);
+        const message = result?.error || (response.status === 503
+          ? 'Cloud file storage is temporarily unavailable. Please try again in a moment.'
+          : `The server returned an invalid response (HTTP ${response.status}).`);
+        throw new Error(message);
       }
 
       navigate(`/editor/${encodeURIComponent(result.roomId)}`);

@@ -152,11 +152,13 @@ export function useCollaborativeRoom(roomId, user) {
       updateRoomState({ status: 'connecting' });
     }
 
-    function handleConnectError(connectError) {
+    async     function handleConnectError(connectError) {
       isJoined = false;
       updateRoomState({
         status: 'error',
-        error: connectError.message || 'Could not connect to the collaboration server.',
+        error: connectError.message === 'Authentication required.'
+          ? 'Your login session has expired. Log in again to rejoin this workspace.'
+          : connectError.message || 'Could not connect to the collaboration server.',
       });
     }
 
@@ -189,7 +191,9 @@ export function useCollaborativeRoom(roomId, user) {
       }
     });
 
-    socket.on('connect', joinRoom);
+    socket.on('connect', () => {
+      joinRoom();
+    });
     socket.on('disconnect', handleDisconnect);
     socket.on('connect_error', handleConnectError);
     socket.on('room:document-update', handleDocumentUpdate);

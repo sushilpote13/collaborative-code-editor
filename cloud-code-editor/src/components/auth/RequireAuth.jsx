@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { apiFetch } from '../../lib/cognito.js';
 
 function RequireAuth({ children }) {
   const location = useLocation();
@@ -8,13 +9,14 @@ function RequireAuth({ children }) {
   const [error, setError] = useState('');
   const [user, setUser] = useState(null);
 
+  const [retryIndex, setRetryIndex] = useState(0);
+
   useEffect(() => {
     const controller = new AbortController();
 
     async function verifySession() {
       try {
-        const response = await fetch('/api/auth/me', {
-          credentials: 'same-origin',
+        const response = await apiFetch('/api/auth/me', {
           signal: controller.signal,
         });
 
@@ -30,7 +32,10 @@ function RequireAuth({ children }) {
         }
 
         if (!response.ok) {
-          throw new Error(`The server returned ${response.status}.`);
+          const message = response.status === 503
+            ? 'The DevLoop authentication service is temporarily unavailable. Please try again.'
+            : `The server returned ${response.status}.`;
+          throw new Error(message);
         }
 
         const result = await response.json();
@@ -46,7 +51,7 @@ function RequireAuth({ children }) {
 
     verifySession();
     return () => controller.abort();
-  }, [location.pathname, navigate]);
+  }, [location.pathname, navigate, retryIndex]);
 
   if (status === 'authenticated') {
     return <>{children(user)}</>;
@@ -59,7 +64,21 @@ function RequireAuth({ children }) {
           <div className="signup-form-panel">
             <h1>Could not verify login</h1>
             <p className="form-notice" role="alert">{error}</p>
-            <Link className="auth-mode-toggle" to="/">Return to login</Link>
+            <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem', alignItems: 'center' }}>
+              <button
+                type="button"
+                className="submit-button"
+                style={{ width: 'auto', padding: '0.6rem 1.2rem' }}
+                onClick={() => {
+                  setError('');
+                  setStatus('checking');
+                  setRetryIndex((count) => count + 1);
+                }}
+              >
+                Retry
+              </button>
+              <Link className="auth-mode-toggle" to="/">Return to login</Link>
+            </div>
           </div>
         </section>
       </main>

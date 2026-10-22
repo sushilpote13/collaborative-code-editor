@@ -29,6 +29,15 @@ async function startServer() {
   const io = new SocketServer(server, { maxHttpBufferSize: 1024 * 1024 });
   registerCollaborationHandlers(io);
 
+  server.on('error', (error) => {
+    if (error.code === 'EADDRINUSE') {
+      console.error(`Port ${port} is already in use. Please stop the process using port ${port} or choose another port.`);
+    } else {
+      console.error('Server error:', error.message);
+    }
+    process.exit(1);
+  });
+
   server.listen(port, '127.0.0.1', () => {
     console.log(`DevLoop API and collaboration server listening at http://127.0.0.1:${port}`);
   });

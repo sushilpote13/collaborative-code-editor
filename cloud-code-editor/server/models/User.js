@@ -33,9 +33,25 @@ const userSchema = new mongoose.Schema(
       trim: true,
       maxlength: 254,
     },
+    cognitoSub: {
+      type: String,
+      unique: true,
+      sparse: true,
+    },
+    // The name Amazon Cognito signs this account in with. The user pool uses
+    // the email address as its sign-in attribute, so that address is the name
+    // of the account inside Cognito. It is kept in the case the person
+    // registered with, because Cognito compares it exactly.
+    cognitoUsername: {
+      type: String,
+      trim: true,
+    },
+    // Legacy local-credential hash kept only so accounts that predate Cognito
+    // keep their stored value untouched. It is never written, selected, or
+    // compared by the application, and it is not required for new accounts.
     passwordHash: {
       type: String,
-      required: true,
+      required: false,
       select: false,
     },
   },

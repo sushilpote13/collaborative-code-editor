@@ -1,4 +1,3 @@
-import jwt from 'jsonwebtoken';
 import * as Y from 'yjs';
 import Room from '../models/Room.js';
 import User from '../models/User.js';
@@ -7,26 +6,12 @@ import {
   disconnectRoomMember,
 } from '../services/roomPresence.js';
 import { s3Storage } from '../services/s3Storage.js';
+import { readSessionCookie, verifySessionToken } from '../services/session.js';
 
 const roomIdPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{2,39}$/;
 const fileNamePattern = /^[A-Za-z][A-Za-z0-9_]{0,59}\.java$/;
 const maxUpdateBytes = 512 * 1024;
 const persistenceDelayMs = 200;
-
-function getAuthToken(cookieHeader = '') {
-  const tokenCookie = cookieHeader.split(';')
-    .map((cookie) => cookie.trim())
-    .find((cookie) => cookie.startsWith('authToken='));
-  if (!tokenCookie) {
-    return null;
-  }
-
-  try {
-    return decodeURIComponent(tokenCookie.slice('authToken='.length));
-  } catch {
-    return null;
-  }
-}
 
 function toUint8Array(value) {
   if (value instanceof Uint8Array) {
@@ -70,20 +55,18 @@ export function registerCollaborationHandlers(
   const persistenceTimers = new Map();
 
   io.use(async (socket, next) => {
-    const token = getAuthToken(socket.request.headers.cookie);
+    const token = readSessionCookie(socket.request.headers.cookie);
     if (!token) {
       return next(new Error('Authentication required.'));
     }
 
-    let payload;
-    try {
-      payload = jwt.verify(token, process.env.JWT_SECRET);
-    } catch {
+    const session = verifySessionToken(token);
+    if (!session) {
       return next(new Error('Authentication required.'));
     }
 
     try {
-      const user = await UserModel.findById(payload.sub).select(
+      const user = await UserModel.findById(session.userId).select(
         '_id username firstName lastName',
       );
       if (!user) {

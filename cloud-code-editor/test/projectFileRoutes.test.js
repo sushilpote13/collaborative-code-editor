@@ -3,10 +3,10 @@ import { createServer } from 'node:http';
 import test from 'node:test';
 import cookieParser from 'cookie-parser';
 import express from 'express';
-import jwt from 'jsonwebtoken';
 import { createProjectFileRouter } from '../server/routes/projectFileRoutes.js';
+import { createSessionToken } from '../server/services/session.js';
 
-const jwtSecret = 'project-file-test-secret';
+const jwtSecret = 'project-file-test-secret-value-at-least-32-chars';
 const roomId = 'project-files-room';
 const fileName = 'Main.java';
 
@@ -30,7 +30,7 @@ async function startProjectFileServer({ storage, roomExists = true, authorized =
   const server = createServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
-  const token = jwt.sign({}, jwtSecret, { subject: 'project-file-user', expiresIn: '1h' });
+  const token = createSessionToken({ userId: 'project-file-user' });
 
   return {
     filesUrl: `http://127.0.0.1:${port}/api/projects/${roomId}/files`,

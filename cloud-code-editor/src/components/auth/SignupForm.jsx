@@ -1,3 +1,5 @@
+import PasswordField from './PasswordField.jsx';
+
 function SignupForm({
   email,
   firstName,
@@ -7,17 +9,20 @@ function SignupForm({
   onFirstNameChange,
   onLastNameChange,
   onPasswordChange,
+  onConfirmPasswordChange,
   onUsernameChange,
   password,
+  confirmPassword,
   username,
 }) {
   return (
     <>
       <div className="name-fields">
-        <label className="form-field">
-          <span>First name</span>
+        <div className="form-field">
+          <label htmlFor="signup-first-name">First name</label>
           <input
             autoComplete="given-name"
+            id="signup-first-name"
             maxLength={80}
             name="firstName"
             onChange={(event) => onFirstNameChange(event.target.value)}
@@ -25,11 +30,12 @@ function SignupForm({
             required
             value={firstName}
           />
-        </label>
-        <label className="form-field">
-          <span>Last name</span>
+        </div>
+        <div className="form-field">
+          <label htmlFor="signup-last-name">Last name</label>
           <input
             autoComplete="family-name"
+            id="signup-last-name"
             maxLength={80}
             name="lastName"
             onChange={(event) => onLastNameChange(event.target.value)}
@@ -37,13 +43,14 @@ function SignupForm({
             required
             value={lastName}
           />
-        </label>
+        </div>
       </div>
 
-      <label className="form-field">
-        <span>Username</span>
+      <div className="form-field">
+        <label htmlFor="signup-username">Username</label>
         <input
           autoComplete="username"
+          id="signup-username"
           maxLength={20}
           minLength={3}
           name="username"
@@ -53,13 +60,14 @@ function SignupForm({
           required
           value={username}
         />
-        <small>Shown in your workspace. Use 3-20 letters, numbers, or underscores.</small>
-      </label>
+        <small>Your name inside shared workspaces. Letters, numbers, and underscores.</small>
+      </div>
 
-      <label className="form-field">
-        <span>Email address</span>
+      <div className="form-field">
+        <label htmlFor="signup-email">Email address</label>
         <input
           autoComplete="email"
+          id="signup-email"
           name="email"
           onChange={(event) => onEmailChange(event.target.value)}
           placeholder="you@example.com"
@@ -67,25 +75,29 @@ function SignupForm({
           type="email"
           value={email}
         />
-      </label>
+        <small>We send a confirmation code here before the account goes live.</small>
+      </div>
 
-      <label className="form-field">
-        <span>Password</span>
-        <input
-          autoComplete="new-password"
-          minLength={8}
-          name="password"
-          onChange={(event) => onPasswordChange(event.target.value)}
-          placeholder="At least 8 characters"
-          required
-          type="password"
-          value={password}
-        />
-        <small>Use at least 8 characters. Passwords are stored as a secure hash.</small>
-      </label>
+      <PasswordField
+        autoComplete="new-password"
+        label="Password"
+        onChange={onPasswordChange}
+        placeholder="Create a password"
+        showChecklist
+        value={password}
+      />
+
+      <PasswordField
+        autoComplete="new-password"
+        label="Confirm password"
+        name="confirmPassword"
+        onChange={onConfirmPasswordChange}
+        placeholder="Repeat your password"
+        value={confirmPassword}
+      />
 
       <button className="create-account-button" disabled={isSubmitting} type="submit">
-        {isSubmitting ? 'Creating account...' : 'Sign up'}
+        {isSubmitting ? 'Creating your account...' : 'Create my account'}
         <span aria-hidden="true">→</span>
       </button>
     </>

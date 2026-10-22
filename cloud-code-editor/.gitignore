@@ -15,6 +15,9 @@ dist-ssr
 .env.*
 !.env.example
 
+# Local diagnostic scripts that print environment values
+*.probe-*.mjs
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

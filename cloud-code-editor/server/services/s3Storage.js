@@ -7,7 +7,7 @@ import {
 } from '@aws-sdk/client-s3';
 
 const s3Client = new S3Client({
-  region: process.env.S3_REGION || 'ap-southeast-2',
+  region: process.env.S3_REGION || process.env.AWS_REGION || process.env.VITE_AWS_REGION || 'ap-southeast-2',
   ...(
     process.env.AWS_PROFILE || process.env.NODE_ENV !== 'production'
       ? { profile: process.env.AWS_PROFILE || 'devloop' }
@@ -16,7 +16,7 @@ const s3Client = new S3Client({
 });
 
 function getConfiguredBucket() {
-  return process.env.S3_BUCKET || 'collaborative-java-editor';
+  return process.env.S3_BUCKET || process.env.S3_BUCKET_NAME || 'collaborative-java-editor';
 }
 
 function projectPrefix(roomId) {

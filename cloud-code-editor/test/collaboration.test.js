@@ -7,8 +7,9 @@ import { io as createSocketClient } from 'socket.io-client';
 import * as Y from 'yjs';
 import { initialCode } from '../shared/initialWorkspace.js';
 import { registerCollaborationHandlers } from '../server/sockets/collaboration.js';
+import { createSessionToken, revokeSessionToken } from '../server/services/session.js';
 
-const jwtSecret = 'realtime-collaboration-test-secret';
+const jwtSecret = 'realtime-collaboration-test-secret-value-32-chars';
 
 function createRoomState() {
   const document = new Y.Doc();
@@ -122,7 +123,11 @@ async function startTestServer({ roomId: existingRoomId, projectFiles: existingP
   const { port } = httpServer.address();
 
   function connect(userId) {
-    const token = jwt.sign({}, jwtSecret, { subject: userId, expiresIn: '1h' });
+    const token = createSessionToken({ userId });
+    return connectWithCookie(token);
+  }
+
+  function connectWithCookie(token) {
     const socket = createSocketClient(`http://127.0.0.1:${port}`, {
       autoConnect: false,
       transports: ['websocket'],
@@ -134,6 +139,7 @@ async function startTestServer({ roomId: existingRoomId, projectFiles: existingP
 
   return {
     connect,
+    connectWithCookie,
     room,
     roomId,
     isolatedRoomId,
@@ -184,6 +190,42 @@ test('Socket.IO rejects unauthenticated clients and unknown rooms', async () => 
     authenticated.disconnect();
   } finally {
     unauthenticated.disconnect();
+    await server.close();
+  }
+});
+
+test('Socket.IO rejects clients that present a forged, unsigned, or revoked session', async () => {
+  process.env.JWT_SECRET = jwtSecret;
+  const server = await startTestServer();
+  const forged = jwt.sign({ purpose: 'devloop-session' }, 'a-different-signing-secret-value', {
+    subject: 'user-one',
+    expiresIn: '1h',
+  });
+  const withoutPurpose = jwt.sign({}, jwtSecret, { subject: 'user-one', expiresIn: '1h' });
+  const revoked = createSessionToken({ userId: 'user-one' });
+  revokeSessionToken(revoked);
+
+  try {
+    for (const [label, token] of [
+      ['a forged token', forged],
+      ['a token without the session purpose', withoutPurpose],
+      ['a revoked token', revoked],
+      ['a token for an unknown user', createSessionToken({ userId: 'missing-user' })],
+    ]) {
+      const socket = server.connectWithCookie(token);
+      try {
+        const authError = waitForEvent(socket, 'connect_error');
+        socket.connect();
+        assert.match(
+          (await authError).message,
+          /Authentication required/,
+          `${label} must be rejected`,
+        );
+      } finally {
+        socket.disconnect();
+      }
+    }
+  } finally {
     await server.close();
   }
 });

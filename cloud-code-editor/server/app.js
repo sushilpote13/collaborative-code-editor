@@ -36,6 +36,9 @@ export function handleApiError(error, _request, response, next) {
   }
 
   if (error.status === 413 || error.status === 503) {
+    if (error.status === 503 && typeof response.setHeader === 'function') {
+      response.setHeader('Retry-After', '3');
+    }
     return response.status(error.status).json({ error: error.message });
   }
 
@@ -44,6 +47,9 @@ export function handleApiError(error, _request, response, next) {
     typeof error.$metadata?.httpStatusCode === 'number'
   ) {
     console.error('Cloud storage API error:', error.name, error.message);
+    if (typeof response.setHeader === 'function') {
+      response.setHeader('Retry-After', '5');
+    }
     return response.status(503).json({
       error: 'Cloud file storage is unavailable. Configure AWS credentials and S3 access for the server.',
     });

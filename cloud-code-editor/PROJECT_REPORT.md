@@ -12,7 +12,7 @@ This report explains the repository layout, the purpose of each source/configura
 - **Socket.IO** carries document changes, cursor/awareness data, and member activity between connected browsers.
 - The **Express** API handles account, room, and Java-runner requests.
 - **MongoDB**, accessed through **Mongoose**, stores users, room metadata, and the saved shared workspace.
-- **JWTs in HTTP-only cookies** identify signed-in users to API routes and Socket.IO.
+- **Amazon Cognito** handles sign-up and sign-in. People use the **DevLoop-branded sign-in screen inside the app**, and the browser performs the password exchange with Cognito over the secure remote password (SRP) protocol. The API verifies the Cognito ID token, then uses a short-lived HTTP-only JWT cookie for API routes and Socket.IO.
 - The server runs `javac` and `java` for the Run Java feature.
 
 ### A short presentation script
@@ -39,7 +39,7 @@ Express + Socket.IO API (port 3001)
 
 ### Typical user journey
 
-1. The user signs up or logs in on the home page. The API validates the request, stores/looks up the user, checks the password hash, and sets an authentication cookie.
+1. The user signs up or logs in on the DevLoop-branded home screen. The screen asks for an email address and password, resolves the account name, and signs in with Cognito over SRP; a new account gets a six digit email-confirmation code, and a forgotten password is reset with a code plus a new password. The browser then sends the Cognito identity token to the API, which verifies it, stores or links the profile, and sets an HTTP-only authentication cookie.
 2. The protected meeting page lets the user create a room or enter a room ID. Creating a room stores a new room with a starter `Main.java`.
 3. The editor opens a Socket.IO connection. The server checks the cookie, verifies that the room exists, and returns its current Yjs state.
 4. CodeMirror edits a Yjs text value for the active Java file. Socket.IO relays Yjs updates to other clients in that room; Yjs merges concurrent edits.
@@ -93,14 +93,15 @@ collaborative-code-editor/                 Git repository root
 
 | File | What it does |
 | --- | --- |
-| [`.env`](.env) | Local-only environment values such as the MongoDB connection URI and JWT signing secret. It is ignored by Git; never share or commit its contents. |
-| [`.env.example`](.env.example) | Safe template showing which environment variables need to be configured for a local run. Replace the placeholder JWT secret in your private `.env`. |
+| [`.env`](.env) | Local-only MongoDB, JWT signing, and Cognito configuration. It is ignored by Git; never share or commit its contents. |
+| [`.env.example`](.env.example) | Safe template showing which environment variables need to be configured for a local run. Cognito settings stay blank until the existing pool values are confirmed. |
 | [`.gitignore`](.gitignore) | Ignores dependencies, build output, logs, local environment files, and common editor files while allowing `.env.example` to be tracked. |
 | [`.oxlintrc.json`](.oxlintrc.json) | Configures Oxlint and enables React-related lint rules, including the Rules of Hooks check. |
 | [`DFSMazeSolver.java`](DFSMazeSolver.java) | Standalone console example of depth-first search through a small maze. It displays the search progress and resulting path; it is not part of the web app's room or Java-runner flow. |
 | [`index.html`](index.html) | Vite's HTML page. It provides the browser root element, favicon, page metadata, and loads `src/main.jsx`. |
 | [`package.json`](package.json) | The application manifest. It lists the React, Vite, Express, Mongoose, Socket.IO, Yjs, CodeMirror, authentication, and lint/test dependencies, plus the npm scripts. |
 | [`package-lock.json`](package-lock.json) | Locks the nested application's dependency versions for repeatable installation. |
+| [`scripts/verifyCognitoSetup.mjs`](scripts/verifyCognitoSetup.mjs) | Read-only Cognito setup check: local settings, pool discovery, hosted-UI domain, scopes, app-client existence, and client authentication method. |
 | [`README.md`](README.md) | Main setup and user/developer documentation: MongoDB and environment setup, login, collaboration, Java execution, limits, and project checks. |
 | [`server.js`](server.js) | Starts the backend process: loads environment variables, validates the MongoDB/JWT settings, connects to MongoDB, creates the HTTP and Socket.IO servers, registers collaboration handlers, and listens on port 3001. |
 | [`vite.config.js`](vite.config.js) | Configures the React plugin and development proxies for `/api` HTTP requests and `/socket.io` WebSocket traffic to the backend. |
@@ -126,21 +127,24 @@ collaborative-code-editor/                 Git repository root
 | File | What it does |
 | --- | --- |
 | [`server/app.js`](server/app.js) | Creates the Express app, installs JSON-body and cookie middleware, mounts API routers, and returns consistent 404 and error responses. |
-| [`server/controllers/authController.js`](server/controllers/authController.js) | Implements signup, login, current-user lookup, and logout. It validates user input, hashes/checks passwords with bcrypt, normalizes email/username, creates/clears the auth cookie, and only returns public user fields. |
-| [`server/middleware/requireAuth.js`](server/middleware/requireAuth.js) | Reads and verifies the JWT cookie for protected HTTP routes. It places the verified user ID on the request or responds with an authentication error. |
+| [`server/controllers/authController.js`](server/controllers/authController.js) | Runs the sign-in and sign-up flows: it verifies the Cognito identity token that the browser sends, resolves an email address to the name Cognito knows, links or creates the MongoDB profile, issues the app session, and revokes it on logout. It also keeps the hosted-UI authorization-code + PKCE flow as a fallback. Only public user fields are returned. |
+| [`server/middleware/requireAuth.js`](server/middleware/requireAuth.js) | Reads and verifies the session cookie for protected HTTP routes, rejects revoked or malformed sessions, and places the verified user ID on the request. |
+| [`server/services/session.js`](server/services/session.js) | Signs and verifies the one-hour app session cookie, enforces the session purpose, and keeps an in-memory revocation list so logout invalidates a token immediately. |
+| [`server/services/cognito.js`](server/services/cognito.js) | Validates the Cognito environment settings and verifies user-pool ID tokens (signature, issuer, expiry, token use, audience) against Cognito's signing keys. |
+| [`server/services/cognitoOAuth.js`](server/services/cognitoOAuth.js) | Validates the OAuth settings, discovers the user pool's endpoints, builds the hosted-UI client (public client with PKCE, no secret), and produces the Cognito sign-out URL. |
 
 #### Database models
 
 | File | What it does |
 | --- | --- |
-| [`server/models/User.js`](server/models/User.js) | Defines the MongoDB user document: names, unique username/email, password hash, and timestamps. The password hash is excluded from normal query results by default. |
+| [`server/models/User.js`](server/models/User.js) | Defines the MongoDB user document: names, unique username/email, Cognito subject, the Cognito username, optional legacy password hash, and timestamps. |
 | [`server/models/Room.js`](server/models/Room.js) | Defines a room document with a unique room ID, creator reference, binary Yjs workspace state, and timestamps. |
 
 #### API routes and services
 
 | File | What it does |
 | --- | --- |
-| [`server/routes/authRoutes.js`](server/routes/authRoutes.js) | Maps `/api/auth/signup`, `/login`, `/logout`, and `/me` to auth-controller functions; `/me` requires authentication. |
+| [`server/routes/authRoutes.js`](server/routes/authRoutes.js) | Maps `/api/auth/login`, `/callback`, `/resolve-signin`, `/token`, `/session`, `/logout`, and `/me` to auth-controller functions; `/me` requires authentication. |
 | [`server/routes/javaRoutes.js`](server/routes/javaRoutes.js) | Defines the authenticated `/api/java/run` endpoint. It validates filenames, required entry point, input, file count, and source-size limits before calling the Java runner. |
 | [`server/routes/roomRoutes.js`](server/routes/roomRoutes.js) | Creates authenticated rooms with a seeded Yjs workspace and provides the authenticated room-presence update endpoint. It accepts model dependencies so route behavior can be tested without a real database. |
 | [`server/services/javaRunner.js`](server/services/javaRunner.js) | Runs Java projects. It writes validated source files into a temporary directory, invokes `javac` and `java`, enforces time/output/memory-related process limits, translates missing JDK tools into API errors, and removes the temporary directory afterward. |
@@ -176,9 +180,19 @@ collaborative-code-editor/                 Git repository root
 
 | File | What it does |
 | --- | --- |
-| [`src/components/auth/LoginForm.jsx`](src/components/auth/LoginForm.jsx) | Presentational login fields and submit button. Its parent page owns the form state and submission. |
-| [`src/components/auth/SignupForm.jsx`](src/components/auth/SignupForm.jsx) | Presentational signup fields, username/password hints, browser-side constraints, and submit button. |
+| [`src/pages/home.jsx`](src/pages/home.jsx) | The branded authentication screen. It owns the screen flow (sign in, create account, confirm email, reset password, second factor, profile) and calls the Cognito client and the session API. |
+| [`src/components/auth/LoginForm.jsx`](src/components/auth/LoginForm.jsx) | Email address and password fields, the forgot-password link, and the submit button of the sign-in screen. |
+| [`src/components/auth/SignupForm.jsx`](src/components/auth/SignupForm.jsx) | Name, username, email, and password fields of the account-creation screen, with the browser-side constraints on the username. |
+| [`src/components/auth/PasswordField.jsx`](src/components/auth/PasswordField.jsx) | Password input with a show/hide toggle and the live password-requirement checklist. |
+| [`src/components/auth/CodeForm.jsx`](src/components/auth/CodeForm.jsx) | Six digit code input used for the email confirmation, the password reset, and the second factor. |
+| [`src/components/auth/ProfileForm.jsx`](src/components/auth/ProfileForm.jsx) | Display name and username fields for the profile step that follows a first sign-in. |
 | [`src/components/auth/RequireAuth.jsx`](src/components/auth/RequireAuth.jsx) | Calls `/api/auth/me` before rendering a protected page. It redirects unauthenticated users to login and shows an error if session verification itself fails. |
+| [`src/lib/cognitoClient.js`](src/lib/cognitoClient.js) | Loads Amplify on demand, configures the user pool, and wraps the Cognito calls the screens need: sign in, sign up, confirm, resend, password reset, second factor, and sign out. |
+| [`src/lib/cognito.js`](src/lib/cognito.js) | Talks to the app API: resolves the account name, exchanges the Cognito identity token for the session cookie, and handles the hosted-UI flow, session renewal, and sign-out. |
+| [`src/lib/authValidation.js`](src/lib/authValidation.js) | Pure rules for the email address, username, password, and confirmation code that the screens check before contacting Cognito. |
+| [`src/lib/authErrors.js`](src/lib/authErrors.js) | Turns a Cognito error into a message a person can act on, and recognizes the "this account already exists" case. |
+| [`src/lib/authFlow.js`](src/lib/authFlow.js) | Pure rules that decide which sign-in screen a failure leads to, so a failed sign-up never leaves the browser on a screen that cannot continue. |
+| [`src/lib/cognitoErrors.js`](src/lib/cognitoErrors.js) | Converts Cognito's public-client secret error into instructions to use an existing no-secret browser app client. |
 
 #### Editor components and styles
 
@@ -200,7 +214,17 @@ collaborative-code-editor/                 Git repository root
 
 | File | What it checks |
 | --- | --- |
-| [`test/collaboration.test.js`](test/collaboration.test.js) | Exercises Socket.IO authentication, rejection of unknown rooms and invalid updates, room-scoped broadcasts, join/leave activity, Yjs changes across clients, concurrent edit convergence, and persistence through a stubbed room model. |
+| [`test/collaboration.test.js`](test/collaboration.test.js) | Exercises Socket.IO authentication (including forged, purpose-less, and revoked sessions), rejection of unknown rooms and invalid updates, room-scoped broadcasts, join/leave activity, Yjs changes across clients, concurrent edit convergence, and persistence through a stubbed room model. |
+| [`test/authRoutes.test.js`](test/authRoutes.test.js) | Checks the PKCE transaction, profile provisioning/linking, verified email, and missing configuration without contacting AWS. |
+| [`test/authSession.test.js`](test/authSession.test.js) | Checks the session cookie flags, purpose binding, expiry, revocation on logout, and rejection of forged or foreign-secret sessions. |
+| [`test/authTokenSession.test.js`](test/authTokenSession.test.js) | Checks the identity-token exchange: the session that starts, the stored Cognito username, the linking of an existing account, the profile step, and the rejection of unverified, unverifiable, and missing tokens. |
+| [`test/authUiHelpers.test.js`](test/authUiHelpers.test.js) | Checks the browser-side rules for the email address, username, password, and code, plus the mapping of Cognito errors to readable messages. |
+| [`test/authAccountLinking.test.js`](test/authAccountLinking.test.js) | Checks the linking of the account behind a verified identity token: an account of an older Cognito identity is linked again instead of refused, a returning account signs in, a first time account is created, and the name of somebody else is not taken over. |
+| [`test/authFlow.test.js`](test/authFlow.test.js) | Checks the screen a failed sign-in leads to, and the message that goes with it, for the API codes and the Cognito errors. |
+| [`test/cognitoRetry.test.js`](test/cognitoRetry.test.js) | Checks that a sign-in that is refused twice is tried again, that every timer of the retry gets a function, and that the message of the server is kept when the retry gives up. |
+| [`test/cognitoPkce.test.js`](test/cognitoPkce.test.js) | Checks the S256 challenge, fresh state/nonce/verifier per attempt, state mismatch handling, and single-use authorization codes. |
+| [`test/cognitoTokenValidation.test.js`](test/cognitoTokenValidation.test.js) | Checks ID-token signature, issuer, expiry, audience, token-use, and subject validation using injected JWKS. |
+| [`test/cognitoConfig.test.js`](test/cognitoConfig.test.js) | Checks OAuth configuration validation, the public-client default, domain/region matching, callback/logout URL rules, and the sign-out URL. |
 | [`test/roomPresence.test.js`](test/roomPresence.test.js) | Checks that multiple tabs count as one member, and that a member leaves only after their last socket disconnects. |
 | [`test/roomRoutes.test.js`](test/roomRoutes.test.js) | Checks the shared starter-code template, authenticated room creation, the stored Yjs starter state, and rejection of room creation without an auth cookie. |
 
@@ -210,9 +234,12 @@ collaborative-code-editor/                 Git repository root
 
 | Method and path | Purpose |
 | --- | --- |
-| `POST /api/auth/signup` | Create an account and set the login cookie. |
-| `POST /api/auth/login` | Verify credentials and set the login cookie. |
-| `POST /api/auth/logout` | Clear the login cookie. |
+| `POST /api/auth/login` | Start the hosted-UI PKCE flow and return the Cognito authorization URL (fallback path). |
+| `POST /api/auth/callback` | Validate state, exchange the authorization code, verify the ID token, and set the app session cookie. |
+| `POST /api/auth/resolve-signin` | Map the email address a person typed to the name Cognito knows the account by. |
+| `POST /api/auth/token` | Verify the Cognito identity token, provision or link the profile, and set the app session cookie. |
+| `POST /api/auth/session` | Verify a Cognito ID token, provision/link the user profile, and set the API session cookie. |
+| `POST /api/auth/logout` | Revoke and clear the app session, clear OAuth flow cookies, and return the Cognito sign-out URL when configured. |
 | `GET /api/auth/me` | Return the current public user for a valid cookie. |
 | `POST /api/rooms` | Create a room seeded with `Main.java`. |
 | `PUT /api/rooms/:roomId/presence` | Refresh a signed-in user's in-memory room presence. |
@@ -238,8 +265,12 @@ Run these commands from `cloud-code-editor/`, not the repository root:
 npm install
 Copy-Item .env.example .env
 # Set MONGODB_URI and a private random JWT_SECRET in .env.
+# Add Cognito values only after confirming the existing pool and app client in AWS Console.
+npm run verify:cognito
 npm run dev
 ```
+
+`npm run verify:cognito` reads the local Cognito settings, loads the user pool's discovery document, and checks that the configured app client exists and does not need a secret. It only reads; it never changes AWS. It prints the exact `aws cognito-idp create-user-pool-client` command when the app client is missing.
 
 MongoDB must be available, and the backend needs a JDK with both `javac` and `java` on `PATH` for the Run Java feature. `npm run dev` starts the API and Vite together; Vite serves the UI and proxies API/WebSocket traffic to port 3001.
 

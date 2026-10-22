@@ -13,6 +13,7 @@ import { useCollaborativeRoom } from '../../hooks/useCollaborativeRoom.js';
 import EditorToolbarButton from './EditorToolbarButton.jsx';
 import PanelSplitter from './PanelSplitter.jsx';
 import QuickOpen from './QuickOpen.jsx';
+import { apiFetch, signOutFromCognito } from '../../lib/cognito.js';
 import './codeEditor.css';
 
 const initialFiles = [{ name: 'Main.java', source: initialCode }];
@@ -193,7 +194,7 @@ function CodeEditor({ user }) {
     setIsCloudFileActionPending(true);
     setRequestError('');
     try {
-      const response = await fetch(
+      const response = await apiFetch(
         `/api/projects/${encodeURIComponent(roomId)}/files`,
         {
           method: 'PUT',
@@ -358,7 +359,7 @@ function CodeEditor({ user }) {
       let replaceConflicts = null;
       let hasConflicts = false;
       try {
-        const listResponse = await fetch(baseUrl, { credentials: 'same-origin' });
+        const listResponse = await apiFetch(baseUrl);
         const listResult = await listResponse.json();
         if (!listResponse.ok) {
           throw new Error(listResult.error || `The server returned ${listResponse.status}.`);
@@ -369,7 +370,7 @@ function CodeEditor({ user }) {
           const fileUrl = `${baseUrl}/${encodeURIComponent(file.name)}`;
           let cloudSource = null;
           if (cloudNames.has(file.name)) {
-            const loadResponse = await fetch(fileUrl, { credentials: 'same-origin' });
+            const loadResponse = await apiFetch(fileUrl);
             const loadedFile = await loadResponse.json();
             if (!loadResponse.ok) {
               throw new Error(loadedFile.error || `The server returned ${loadResponse.status}.`);
@@ -389,9 +390,8 @@ function CodeEditor({ user }) {
             }
           }
           if (cloudSource !== file.source) {
-            const saveResponse = await fetch(fileUrl, {
+            const saveResponse = await apiFetch(fileUrl, {
               method: 'PUT',
-              credentials: 'same-origin',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ source: file.source }),
             });
@@ -399,7 +399,7 @@ function CodeEditor({ user }) {
             if (!saveResponse.ok) {
               throw new Error(saveResult.error || `The server returned ${saveResponse.status}.`);
             }
-            const verifyResponse = await fetch(fileUrl, { credentials: 'same-origin' });
+            const verifyResponse = await apiFetch(fileUrl);
             const verifiedFile = await verifyResponse.json();
             if (!verifyResponse.ok || verifiedFile.source !== file.source) {
               throw new Error(`S3 verification failed for ${file.name}.`);
@@ -498,9 +498,8 @@ function CodeEditor({ user }) {
       return { files: nextFiles, openFiles: nextOpenFiles, activeFileName: nextActiveFileName };
     });
     try {
-      const response = await fetch(
+      const response = await apiFetch(
         `/api/projects/${encodeURIComponent(roomId)}/files`,
-        { credentials: 'same-origin' },
       );
       const result = await response.json();
       if (!response.ok) {
@@ -657,9 +656,9 @@ function CodeEditor({ user }) {
 
     void (async () => {
       try {
-        const response = await fetch(
+        const response = await apiFetch(
           `/api/projects/${encodeURIComponent(roomId)}/files/${encodeURIComponent(name)}`,
-          { method: 'DELETE', credentials: 'same-origin' },
+          { method: 'DELETE' },
         );
         if (!response.ok) {
           const result = await response.json();
@@ -698,9 +697,8 @@ function CodeEditor({ user }) {
     setIsCloudFileActionPending(true);
     setRequestError('');
     try {
-      const response = await fetch(
+      const response = await apiFetch(
         `/api/projects/${encodeURIComponent(roomId)}/files/${encodeURIComponent(activeFile.name)}`,
-        { credentials: 'same-origin' },
       );
       const result = await response.json();
       if (!response.ok) {
@@ -734,10 +732,9 @@ function CodeEditor({ user }) {
     setOutputKind('empty');
 
     try {
-      const response = await fetch('/api/java/run', {
+      const response = await apiFetch('/api/java/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
         body: JSON.stringify({
           sourceFiles: readSharedFiles(collaboration.document, files),
           input: programInput,
@@ -794,14 +791,7 @@ function CodeEditor({ user }) {
     setRequestError('');
 
     try {
-      const response = await fetch('/api/auth/logout', {
-        method: 'POST',
-        credentials: 'same-origin',
-      });
-      if (!response.ok) {
-        throw new Error(`The server returned ${response.status}.`);
-      }
-
+      await signOutFromCognito();
       navigate('/', { replace: true });
     } catch (error) {
       setRequestError(`Could not log out: ${error.message}`);

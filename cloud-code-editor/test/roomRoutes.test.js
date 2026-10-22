@@ -3,12 +3,12 @@ import { createServer } from 'node:http';
 import test from 'node:test';
 import cookieParser from 'cookie-parser';
 import express from 'express';
-import jwt from 'jsonwebtoken';
 import { handleApiError } from '../server/app.js';
 import { createRoomRouter } from '../server/routes/roomRoutes.js';
+import { createSessionToken } from '../server/services/session.js';
 import { createInitialCode, initialCode } from '../shared/initialWorkspace.js';
 
-const jwtSecret = 'room-creation-test-secret';
+const jwtSecret = 'room-creation-test-secret-value-at-least-32-chars';
 const expectedStarterCode = `public class Main {
     public static void main(String[] args) {
         System.out.println("Hello, DevLoop!");
@@ -57,7 +57,7 @@ test('authenticated room creation stores a seeded Yjs workspace', async () => {
   const server = createServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
-  const token = jwt.sign({}, jwtSecret, { subject: 'room-owner', expiresIn: '1h' });
+  const token = createSessionToken({ userId: 'room-owner' });
 
   try {
     const response = await fetch(`http://127.0.0.1:${port}/api/rooms`, {
@@ -137,7 +137,7 @@ test('room creation reports unavailable S3 credentials without creating an incom
   const server = createServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
-  const token = jwt.sign({}, jwtSecret, { subject: 'room-owner', expiresIn: '1h' });
+  const token = createSessionToken({ userId: 'room-owner' });
 
   try {
     const response = await fetch(`http://127.0.0.1:${port}/api/rooms`, {

@@ -5,8 +5,11 @@ import { requireAuth } from '../middleware/requireAuth.js';
 export function createAuthRouter({ authController = createAuthController() } = {}) {
   const router = Router();
 
-  router.post('/signup', authController.signup);
-  router.post('/login', authController.login);
+  router.post('/login', authController.startLogin);
+  router.post('/callback', authController.completeLogin);
+  router.post('/session', authController.createSession);
+  router.post('/token', authController.createSessionFromToken);
+  router.post('/resolve-signin', authController.resolveSignInIdentifier);
   router.post('/logout', authController.logout);
   router.get('/me', requireAuth, authController.currentUser);
 

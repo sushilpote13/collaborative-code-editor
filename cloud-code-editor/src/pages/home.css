@@ -203,6 +203,12 @@
   font-weight: 600;
 }
 
+.form-field label {
+  color: #dedbe5;
+  font-size: 0.77rem;
+  font-weight: 600;
+}
+
 .form-field input {
   width: 100%;
   min-height: 44px;
@@ -282,6 +288,121 @@
   color: #cba7f4;
   font-size: 0.75rem;
   line-height: 1.5;
+}
+
+.form-notice.is-error {
+  color: #ffb4b4;
+}
+
+.form-notice.is-success {
+  color: #9ce8c4;
+}
+
+.password-input {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.password-input input {
+  padding-right: 62px;
+}
+
+.password-toggle {
+  position: absolute;
+  right: 6px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--signup-muted);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 650;
+}
+
+.password-toggle:hover {
+  color: #e8d3ff;
+  background: rgb(255 255 255 / 6%);
+}
+
+.password-toggle:focus-visible {
+  outline: 2px solid #d4afff;
+  outline-offset: 2px;
+}
+
+.password-requirements {
+  display: grid;
+  gap: 4px;
+  margin: 2px 0 0;
+  padding: 0;
+  color: #8b8694;
+  font-size: 0.7rem;
+  font-weight: 400;
+  list-style: none;
+}
+
+.requirement {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.requirement span {
+  width: 12px;
+  color: #6f6a79;
+  text-align: center;
+}
+
+.requirement.is-met {
+  color: #9ce8c4;
+}
+
+.requirement.is-met span {
+  color: #9ce8c4;
+}
+
+.code-input {
+  height: 56px;
+  font-size: 1.35rem !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.5em;
+  text-align: center;
+}
+
+.code-input::placeholder {
+  color: #4c4854;
+  letter-spacing: 0.5em;
+}
+
+.link-button {
+  justify-self: start;
+  padding: 0;
+  border: 0;
+  color: #d2a8ff;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 650;
+}
+
+.link-button:hover {
+  color: #e8d3ff;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.link-button:focus-visible {
+  border-radius: 2px;
+  outline: 2px solid #d4afff;
+  outline-offset: 3px;
+}
+
+.link-button:disabled {
+  cursor: wait;
+  opacity: 0.7;
 }
 
 .form-footer {
