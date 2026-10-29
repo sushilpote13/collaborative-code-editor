@@ -1,0 +1,1132 @@
+================================================================================
+DEVLoop / CLOUD CODE EDITOR - COMPLETE PROJECT INFORMATION
+================================================================================
+
+WHAT THIS DOCUMENT IS
+---------------------
+This file explains the whole project in plain language:
+  - what the project does
+  - how the frontend, backend, database, and AWS services fit together
+  - what every important file is for
+  - which AWS services are used and exactly how they are used
+  - the API routes and real-time Socket.IO events
+  - how to run, test, and explain the project to somebody else
+
+Project name in the UI: DevLoop
+Folder name: cloud-code-editor
+Main tech: React + Vite (frontend), Express + Socket.IO (backend),
+           MongoDB/Mongoose (database), Yjs (real-time shared document),
+           CodeMirror (code editor), Java (compile/run feature),
+           Amazon Cognito (authentication), Amazon S3 (project file storage).
+
+
+================================================================================
+1. PROJECT IN ONE MINUTE
+================================================================================
+
+DevLoop is a browser-based, collaborative Java code editor.
+
+A signed-in user can:
+  - create a new meeting room, or join an existing room by room ID / invite link
+  - edit Java files together with other users in real time
+  - create, rename, and delete Java files in the shared workspace
+  - see other members of the room, their presence, and cursor/awareness updates
+  - compile and run the Java project from the browser
+  - keep the workspace saved in the cloud (Amazon S3)
+  - sign up, confirm their email, sign in, reset a password, complete MFA,
+    and sign out using a DevLoop-branded login screen backed by Amazon Cognito
+
+Short presentation script:
+  "DevLoop is a collaborative Java coding workspace. The React frontend has
+   login, meeting-room selection, and the editor. Express handles authentication,
+   rooms, project files, and running Java. Each room has a shared Yjs document
+   containing Java files. Socket.IO sends document and presence updates between
+   users, and Amazon S3 saves the project files. Amazon Cognito manages accounts,
+   passwords, email confirmation, and MFA. The browser sends Cognito's identity
+   token to our server, the server verifies it, and then issues its own short-lived
+   HTTP-only session cookie. CodeMirror provides the editor, and the backend uses
+   the local JDK to run javac and java."
+
+
+================================================================================
+2. HIGH-LEVEL ARCHITECTURE
+================================================================================
+
+Browser (React + Vite)
+  |
+  |  HTTP  /api/*            (login, rooms, project files, run Java)
+  |  WebSocket /socket.io    (Yjs document updates, awareness, presence)
+  v
+Vite dev server (proxy)
+  |  /api       -> http://127.0.0.1:3001
+  |  /socket.io -> http://127.0.0.1:3001
+  v
+Express + Socket.IO API (port 3001, bound to 127.0.0.1)
+  |
+  +-- Amazon Cognito        account sign-up/sign-in, ID token verification
+  +-- MongoDB (Mongoose)    users + room metadata/legacy room snapshots
+  +-- Amazon S3             project files (workspace.json per room)
+  +-- Local JDK             javac + java for the Run Java feature
+  +-- In-memory state       Yjs room documents, presence, session revocations
+
+Important: the browser never talks to S3 directly. Only the backend talks to S3.
+The browser talks to Cognito directly for the password/SRP sign-in step, then the
+backend verifies the resulting Cognito identity token.
+
+Typical user journey:
+  1. User opens the site and signs up or signs in on the DevLoop login screen.
+  2. Cognito checks the email/password (SRP) and may require email confirmation,
+     MFA, or a password reset code.
+  3. The browser sends the Cognito ID token to POST /api/auth/token.
+  4. The server verifies the token, links or creates the MongoDB user profile,
+     and sets an HTTP-only JWT session cookie (1 hour).
+  5. The user goes to /meetings, creates a room, or joins one by room ID.
+  6. POST /api/rooms creates a room plus a starter Main.java. The initial file is
+     written to S3 and verified, and a Room metadata row is created in MongoDB.
+  7. The editor opens Socket.IO, authenticates with the session cookie, joins the
+     room, loads the room's files from S3, and receives the current Yjs state.
+  8. Users edit. Yjs merges concurrent edits. Socket.IO relays updates to the room.
+     The server debounces writes and saves the workspace to S3.
+  9. "Run Java" sends all workspace files + optional input to POST /api/java/run.
+     The server writes temp files, runs javac, runs Main, and returns output.
+
+
+================================================================================
+3. AWS SERVICES USED - AND EXACTLY HOW THEY ARE USED
+================================================================================
+
+This project uses the following AWS services:
+
+  1) AMAZON COGNITO (User Pools) - AUTHENTICATION
+  -------------------------------------------------
+  Used for:
+    - user sign-up
+    - sign-in with email + password
+    - secure remote password (SRP) authentication in the browser
+    - email confirmation with a 6-digit code
+    - resending the confirmation code
+    - password reset with a code + new password
+    - MFA / second-factor challenge (SMS / TOTP) when the pool requires it
+    - hosted-UI OAuth fallback (authorization code + PKCE)
+    - Cognito sign-out URL
+    - ID token verification on the backend
+
+  Frontend side:
+    - Libraries: aws-amplify, @aws-amplify/auth, @aws-amplify/core
+    - File: src/lib/cognitoClient.js
+    - Amplify is loaded lazily (dynamic import) only when the user actually
+      performs an authentication action.
+    - Amplify is configured with:
+        Auth.Cognito.userPoolId
+        Auth.Cognito.userPoolClientId / userPoolWebClientId
+        Auth.Cognito.loginWith.email = true
+    - Calls used:
+        auth.signIn                         (SRP sign-in)
+        auth.signUp                         (create account)
+        auth.confirmSignUp                  (email code)
+        auth.resendSignUpCode               (new email code)
+        auth.autoSignIn                     (after confirmation)
+        auth.resetPassword                  (send reset code)
+        auth.confirmResetPassword           (code + new password)
+        auth.confirmSignIn                  (MFA challenge)
+        auth.signOut                        (drop Cognito browser session)
+        Amplify.fetchAuthSession            (read ID token)
+    - Cognito account name = the user's email address (the user pool uses email
+      as its sign-in attribute). The DevLoop username is stored in Cognito as
+      the "preferred_username" attribute.
+
+  Backend side:
+    - Library: aws-jwt-verify
+    - File: server/services/cognito.js
+    - Verifies the Cognito ID token:
+        signature (JWKS from Cognito)
+        issuer
+        expiry
+        token_use = id
+        audience = configured app client ID
+        subject (sub) present
+    - Library: openid-client
+    - File: server/services/cognitoOAuth.js
+    - Used for the hosted-UI fallback: discovers the user pool's OpenID
+      configuration, builds the OAuth client, exchanges the authorization code
+      with PKCE, validates the callback/logout URLs, and creates the Cognito
+      logout URL.
+    - Session after Cognito: the backend issues its own JWT in an HTTP-only
+      cookie (server/services/session.js), not a Cognito token.
+
+  Cognito configuration required in .env:
+    VITE_AWS_REGION
+    VITE_COGNITO_USER_POOL_ID
+    VITE_COGNITO_CLIENT_ID
+    COGNITO_DOMAIN
+    COGNITO_CALLBACK_URL
+    COGNITO_LOGOUT_URL
+    COGNITO_CLIENT_SECRET  (normally empty for a public/no-secret app client)
+
+  Cognito user pool requirements:
+    - Email as the sign-in attribute
+    - App client allows ALLOW_USER_SRP_AUTH and ALLOW_REFRESH_TOKEN_AUTH
+    - App client allows authorization code grant and scopes openid, email
+    - Callback URL and sign-out URL must exactly match the app client settings
+    - Managed login branding style must be assigned if hosted UI is used
+    - The README says existing AWS settings should be reviewed before changing them
+
+  Verification:
+    - Script: scripts/verifyCognitoSetup.mjs  (npm run verify:cognito)
+    - This is READ-ONLY. It checks local config, the user pool discovery
+      document, issuer, hosted-UI domain, scopes, code flow, app client
+      existence, client secret usage, hosted login page rendering, and whether
+      the pool signs users in by email.
+    - It uses the AWS CLI internally for:
+        aws cognito-idp initiate-auth
+        aws cognito-idp describe-user-pool
+    - It never creates or changes AWS resources.
+
+  2) AMAZON S3 (Simple Storage Service) - PROJECT FILE STORAGE
+  ------------------------------------------------------------
+  Used for:
+    - storing each room's Java project files in the cloud
+    - listing project files
+    - loading a file
+    - saving/replacing a file or the whole workspace
+    - deleting a file
+    - migrating old MongoDB room snapshots into S3
+    - legacy file migration
+
+  Library:
+    @aws-sdk/client-s3
+  Main file:
+    server/services/s3Storage.js
+
+  S3 operations used:
+    PutObjectCommand             write workspace.json
+    GetObjectCommand             read workspace.json or a legacy file
+    DeleteObjectCommand          delete legacy per-file object
+    paginateListObjectsV2        list legacy per-file objects under a room prefix
+
+  S3 object layout:
+    Bucket: configured by S3_BUCKET or S3_BUCKET_NAME
+            (default: collaborative-java-editor)
+    Region: S3_REGION, else AWS_REGION, else VITE_AWS_REGION,
+            else default ap-southeast-2
+    Key:    projects/<roomId>/workspace.json
+
+  Storage format:
+    workspace.json contains JSON: { "files": [ { "name": "...", "source": "..." } ] }
+    One object holds all files for a room.
+    Server-side encryption: ServerSideEncryption = "AES256" (SSE-S3).
+    Content type: application/json; charset=utf-8.
+
+  Where S3 is used:
+    - server/routes/roomRoutes.js
+        On room creation: writes the starter Main.java, reads it back, verifies
+        it, then creates the Room row in MongoDB.
+    - server/routes/projectFileRoutes.js
+        GET    /api/projects/:roomId/files
+        PUT    /api/projects/:roomId/files
+        GET    /api/projects/:roomId/files/:fileName
+        PUT    /api/projects/:roomId/files/:fileName
+        DELETE /api/projects/:roomId/files/:fileName
+    - server/sockets/collaboration.js
+        Loads a room's files from S3 when the room document is first opened.
+        Debounces (200 ms) and saves the latest workspace to S3 after edits.
+        Supports migration from old MongoDB Yjs snapshots (Room.state).
+    - scripts/migrateRoomFilesToS3.js
+        Moves old Yjs room snapshots from MongoDB into S3, verifies the copy,
+        and can optionally remove the MongoDB snapshot after verification.
+
+  Credentials:
+    - The AWS SDK default credential provider chain is used.
+    - AWS_PROFILE can select a named profile. The sample .env sets
+      AWS_PROFILE=devloop.
+    - No AWS access keys are placed in the frontend or source code.
+    - The server needs permission to GetObject, PutObject, DeleteObject, and
+      ListBucket for the configured bucket/prefix.
+
+  Error handling:
+    - S3/AWS credential errors are returned to the client as HTTP 503 with
+      "Cloud file storage is unavailable..." and a Retry-After header.
+    - Missing objects are translated to HTTP 404 where appropriate.
+    - Writes are serialized per room to avoid races, then read back/verified
+      in several flows.
+
+  3) AWS IAM / CREDENTIALS (implicitly)
+  -------------------------------------
+  Not directly called by application code, but required:
+    - an AWS identity with Cognito read/verify permissions for the setup script
+    - an AWS identity with S3 permissions for the backend
+    - credentials supplied through the default provider chain / AWS_PROFILE
+    - the Cognito user pool app client itself is an AWS resource
+
+  AWS services NOT used by this project:
+    - No EC2, ECS, EKS, Lambda, API Gateway, CloudFront, Route 53, RDS,
+      DynamoDB, SQS, SNS, CloudWatch (application code), or Secrets Manager.
+    - MongoDB is a separate database (local MongoDB or a managed
+      MongoDB-compatible service such as MongoDB Atlas). MongoDB Atlas is not an
+      AWS service, even if it is hosted on AWS infrastructure.
+    - There is no AWS deployment configuration in this repository. The app is
+      run locally with npm scripts; hosting/deployment would be separate.
+
+  AWS SDK / package summary:
+    @aws-sdk/client-s3        backend S3 operations
+    aws-jwt-verify            backend Cognito ID token verification
+    aws-amplify               frontend Cognito integration
+    @aws-amplify/auth         frontend auth API
+    @aws-amplify/core         frontend Amplify core
+    openid-client             backend hosted-UI OAuth/PKCE fallback
+    AWS CLI (external)        used only by scripts/verifyCognitoSetup.mjs
+
+
+================================================================================
+4. ENVIRONMENT VARIABLES (.env / .env.example)
+================================================================================
+
+Never commit or share the real .env file. .env is ignored by Git.
+
+MONGODB_URI
+  MongoDB / MongoDB-compatible connection string.
+
+MONGODB_TLS
+  "true" enables TLS for MongoDB.
+
+MONGODB_TLS_CA_FILE
+  Optional CA file path for MongoDB TLS.
+
+MONGODB_MIGRATION_SOURCE_URI
+MONGODB_MIGRATION_DESTINATION_URI
+MONGODB_MIGRATION_SOURCE_TLS
+MONGODB_MIGRATION_DESTINATION_TLS
+MONGODB_MIGRATION_CA_FILE
+  Used only by scripts/migrateMongoData.js to copy users/rooms between databases.
+
+JWT_SECRET
+  Secret for signing the DevLoop session cookie and temporary auth-flow cookies.
+  Must be at least 32 characters. Generate with:
+    node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
+
+AWS_PROFILE
+  Optional AWS named profile, example: devloop.
+
+S3_BUCKET / S3_BUCKET_NAME
+  S3 bucket for project files. Default: collaborative-java-editor.
+
+S3_REGION / AWS_REGION
+  AWS region for S3. Default fallback: ap-southeast-2.
+
+VITE_AWS_REGION
+  AWS region of the Cognito user pool. Also used as an S3 region fallback.
+
+VITE_COGNITO_USER_POOL_ID
+  Cognito user pool ID, format: <region>_<id>.
+
+VITE_COGNITO_CLIENT_ID
+  Cognito app client ID. Must exist in the configured user pool.
+
+COGNITO_DOMAIN
+  Cognito hosted-UI domain, a bare https URL with no path.
+  Example: https://your-domain.auth.your-region.amazoncognito.com
+
+COGNITO_CALLBACK_URL
+  Exact allowed callback URL, example: http://localhost:5173/
+
+COGNITO_LOGOUT_URL
+  Exact allowed sign-out URL, example: http://localhost:5173/
+
+COGNITO_CLIENT_SECRET
+  Leave empty for a public app client (recommended). Set it only if the app
+  client was created with a secret.
+
+Note: VITE_ variables are included in the browser bundle. Cognito region/pool/
+client IDs are identifiers, not secrets. Never put AWS access keys or a Cognito
+client secret into a VITE_ variable.
+
+
+================================================================================
+5. FILE-BY-FILE GUIDE
+================================================================================
+
+ROOT-LEVEL FILES
+----------------
+.env
+  Real local environment configuration. Contains secrets/credentials. Ignored
+  by Git. Do not share or commit it.
+
+.env.example
+  Safe template listing every required environment variable.
+
+.env.save
+  A saved copy of environment settings in this workspace. Treat it as private.
+  It is not part of the normal application flow.
+
+.gitignore
+  Ignores node_modules, dist, logs, .env files, and common editor/OS files while
+  keeping .env.example trackable.
+
+.oxlintrc.json
+  Oxlint configuration, including React/Hooks lint rules.
+
+package.json
+  Application manifest: scripts and dependencies (React, Vite, Express,
+  Mongoose, Socket.IO, Yjs, CodeMirror, AWS/Cognito, openid-client, tests, lint).
+
+package-lock.json
+  Locks exact dependency versions for repeatable installs.
+
+index.html
+  Vite HTML entry page. Loads src/main.jsx and sets the browser root element.
+
+vite.config.js
+  Vite + React plugin configuration. Proxies /api and /socket.io (including
+  WebSocket upgrade) to the API on 127.0.0.1:3001. Also optimizes AWS Amplify
+  dependencies.
+
+server.js
+  Backend entry point. Loads .env, validates MONGODB_URI and JWT_SECRET, connects
+  to MongoDB, creates the HTTP server and Socket.IO server, registers
+  collaboration handlers, handles port-in-use errors, and listens on port 3001
+  on 127.0.0.1.
+
+README.md
+  Setup and feature documentation: Cognito setup, login flow, real-time
+  collaboration, Java editor, limits, and checks.
+
+PROJECT_REPORT.md
+  Existing human-readable project guide. NOTE: it describes the older design
+  where room state was persisted in MongoDB. The current code saves project
+  files primarily to Amazon S3, with MongoDB used for users, room metadata, and
+  legacy snapshots. This file (PROJECT_INFORMATION.txt) describes the current
+  code.
+
+PROJECT_INFORMATION.txt
+  This document.
+
+DFSMazeSolver.java
+  Standalone Java console demo of depth-first search through a maze. It is NOT
+  part of the web app's room/editor/run flow. It is just an example Java file.
+
+dist/
+  Generated production build output from `npm run build`. Do not edit by hand.
+  Contains bundled JS/CSS, favicon, icons, and index.html.
+
+node_modules/
+  Installed dependencies. Generated by npm. Do not edit.
+
+public/favicon.svg
+  Browser tab favicon.
+
+public/icons.svg
+  SVG icon sprite with reusable icon artwork.
+
+src/assets/DevLoop Neon Cloud Logo.png
+  DevLoop brand logo used on the home/login screen.
+
+SHARED CODE
+-----------
+shared/initialWorkspace.js
+  Defines the starter Java program. createInitialCode(className) returns:
+      public class <className> {
+          public static void main(String[] args) {
+              System.out.println("Hello, DevLoop!");
+          }
+      }
+  initialCode is the default Main.java source. Used by both frontend and backend
+  so new files/rooms start consistently.
+
+BACKEND (server/)
+-----------------
+server/app.js
+  Builds the Express app. Adds JSON body parsing (256 KB limit) and cookie
+  parsing. Mounts:
+      /api/auth      authentication
+      /api/java      Java runner
+      /api/projects  S3-backed project files
+      /api/rooms     room creation and presence
+  Adds a JSON 404 handler and a centralized error handler (413 payload too
+  large, invalid JSON, 503 storage unavailable, generic 500).
+
+server/controllers/authController.js
+  Main authentication logic:
+    - startLogin: starts hosted-UI PKCE fallback, creates a signed transaction
+      cookie (state, nonce, code verifier, mode, profile, returnTo).
+    - completeLogin: validates state, consumes the single-use transaction,
+      exchanges the authorization code, verifies the ID token and nonce, links
+      or creates the user, sets the session cookie.
+    - createSession: creates the app session from the temporary verified-profile
+      cookie (used for the profile-completion step).
+    - createSessionFromToken: verifies a Cognito ID token sent by the browser,
+      provisions/links the user, sets the DevLoop session cookie. This is the
+      main path used by the custom sign-in screen.
+    - resolveSignInIdentifier: maps typed email/username to the name Cognito
+      knows the account by.
+    - currentUser: returns the public user for /api/auth/me.
+    - logout: revokes the session token in memory, clears cookies, returns the
+      Cognito logout URL when configured.
+  Also contains profile validation, safe redirect validation, public-user
+  shaping, account linking, duplicate-account handling, and readable mapping of
+  Cognito token-exchange errors.
+
+server/middleware/requireAuth.js
+  Reads the authToken cookie, verifies the JWT session, rejects missing,
+  expired, revoked, or malformed sessions, and puts userId/cognitoSub on
+  request.auth for protected routes.
+
+server/services/session.js
+  Creates and verifies the app session JWT:
+    - cookie name: authToken
+    - lifetime: 1 hour
+    - HTTP-only, SameSite=Lax, Secure in production
+    - purpose claim: devloop-session
+    - unique jti per session
+    - in-memory revocation map for immediate logout
+  Note: the revocation map is in process memory, so it resets when the API
+  restarts (this can only shorten a revoked session; it never extends one).
+
+server/services/cognito.js
+  Validates Cognito configuration and verifies ID tokens with aws-jwt-verify.
+  Defines typed errors:
+    CognitoConfigurationError
+    CognitoVerificationUnavailableError
+    CognitoTokenInvalidError
+  Caches the verifier and JWKS. Also checks nonce matching for the hosted-UI
+  flow.
+
+server/services/cognitoOAuth.js
+  Hosted-UI/OAuth fallback configuration:
+    - validates region, pool, client ID, domain, callback URL, logout URL
+    - rejects duplicate COGNITO_CLIENT_ID settings
+    - requires HTTPS outside localhost
+    - verifies the hosted domain belongs to the configured region
+    - discovers the pool issuer and endpoints via openid-client
+    - builds a public client (no secret) or confidential client (with secret)
+    - creates the Cognito logout URL
+
+server/models/User.js
+  Mongoose model for users:
+    firstName, lastName
+    username (unique, lowercase, 3-20 chars, /^[a-z][a-z0-9_]{2,19}$/)
+    email (unique, lowercase)
+    cognitoSub (unique, sparse)
+    cognitoUsername (the email Cognito signs the account in with)
+    passwordHash (legacy, not used/selected for Cognito accounts)
+    timestamps
+
+server/models/Room.js
+  Mongoose model for room metadata:
+    roomId (unique, 3-40 chars /^[A-Za-z0-9][A-Za-z0-9_-]{2,39}$/)
+    createdBy (User reference)
+    state (optional Buffer: legacy Yjs snapshot, used for migration/fallback)
+    timestamps
+
+server/routes/authRoutes.js
+  Maps auth endpoints:
+    POST /login
+    POST /callback
+    POST /session
+    POST /token
+    POST /resolve-signin
+    POST /logout
+    GET  /me          (requires auth)
+
+server/routes/javaRoutes.js
+  POST /run (authenticated). Accepts either a single `source` string or a
+  `sourceFiles` array plus optional stdin `input`. Validates:
+    - 1 to 20 files
+    - Java filename pattern
+    - unique filenames (case-insensitive)
+    - each file <= 32 KB
+    - total <= 128 KB
+    - Main.java must be present
+    - input <= 16 KB
+  Calls javaRunner and returns compile/run output.
+
+server/routes/projectFileRoutes.js
+  S3-backed project file API, all authenticated and room-membership checked:
+    GET    /:roomId/files                 list files
+    PUT    /:roomId/files                 replace whole workspace
+    PUT    /:roomId/files/:fileName       save one file
+    GET    /:roomId/files/:fileName       load one file
+    DELETE /:roomId/files/:fileName       delete one file
+  Validates room ID, filename, file count, per-file size, total size, unique
+  names, and required Main.java. Uses isRoomMember() to require an active
+  collaboration connection.
+
+server/routes/roomRoutes.js
+  POST / (authenticated)
+    Creates a UUID room, creates initial Main.java in a Yjs document, writes it
+    to S3, reads it back and verifies it, then creates the MongoDB Room record.
+  PUT /:roomId/presence (authenticated)
+    Checks the room exists, loads the user, updates in-memory presence, and
+    returns the current member list.
+
+server/services/javaRunner.js
+  Runs Java safely-ish for local trusted code:
+    - creates a temporary workspace directory
+    - writes source files
+    - compiles with javac (-J-Xmx256m, UTF-8, 15s timeout)
+    - runs Main with java (-Xms16m -Xmx128m, MaxMetaspace 128m, 2 CPUs,
+      8s timeout, 64 KB output cap)
+    - captures stdout/stderr and flags timeouts/output truncation
+    - deletes the temp directory afterwards
+    - returns 503 if javac/java are missing
+  It is NOT a secure sandbox. It runs as the same OS user as the backend.
+
+server/services/roomPresence.js
+  In-memory presence manager:
+    - maps roomId -> userId -> member info + socketIds
+    - multiple tabs for one user count as one member
+    - users leave when their last socket disconnects
+    - stale members expire after 35 seconds if they have no sockets
+    - list is sorted by joinedAt
+  Presence resets when the API restarts.
+
+server/services/s3Storage.js
+  S3 storage layer:
+    - builds an S3Client using the default AWS credential chain
+    - region and bucket resolution with defaults
+    - validates project files (count, names, sizes, Main.java)
+    - serializes operations per room to avoid write races
+    - read/write/list/delete workspace files
+    - workspace object: projects/<roomId>/workspace.json
+    - SSE-S3 AES256 encryption
+    - legacy per-file migration support and verification
+    - translates missing objects to NoSuchKey/NotFound
+  Exports createS3Storage() (for tests), s3Storage singleton, and
+  isS3ObjectNotFound().
+
+server/sockets/collaboration.js
+  Socket.IO collaboration server:
+    - handshake authentication using the session cookie
+    - loads room files from S3, or migrates legacy Room.state Yjs snapshots
+    - keeps one Y.Doc per active room in memory
+    - validates document updates (types, file count, sizes, Main.java)
+    - broadcasts document updates only to the room
+    - relays awareness updates (cursors/presence metadata)
+    - maintains in-memory presence and member join/leave events
+    - debounces persistence to S3 (200 ms) and serializes writes per room
+    - emits room:error when an update/persistence fails
+    - supports a client leaving a room or switching rooms
+
+server (frontend src/)
+----------------------
+src/main.jsx
+  React entry point. Imports global CSS, creates the React root, renders App in
+  StrictMode.
+
+src/App.jsx
+  Client-side routing:
+    /                  home/login/signup
+    /meetings          authenticated room selection
+    /editor/:roomId    authenticated collaborative editor
+  Meeting and editor routes are wrapped by RequireAuth.
+
+src/index.css
+  Global font, box sizing, and full-window layout.
+
+src/pages/home.jsx
+  The DevLoop-branded authentication screen and state machine. Screens:
+    login, signup, confirm, forgot, reset, mfa, profile
+  Responsibilities:
+    - form state for email, password, names, username, code
+    - sign-in via Cognito SRP
+    - sign-up and email confirmation
+    - password reset
+    - MFA
+    - profile completion
+    - calling /api/auth/token to create the app session
+    - error messages and navigation after success
+    - detects hosted-UI callback query parameters/errors
+  Imports the logo and the auth form components.
+
+src/pages/home.css
+  Styling for the branded login/signup page, intro panel, forms, responsive
+  layout, password checklist, and error/notice states.
+
+src/pages/meetingPage.jsx
+  Authenticated room selection page:
+    - validate a typed room ID and navigate to /editor/<roomId>
+    - create a room via POST /api/rooms and navigate to it
+    - show creating/loading/error states
+    - show display name and "back to room" link when applicable
+
+src/pages/meetingPage.css
+  Styling for the meeting page and narrow-screen layout.
+
+src/pages/editorPage.jsx
+  Route wrapper for the editor. Lazy-loads CodeEditor with React.lazy/Suspense
+  so the large editor bundle is only downloaded when needed.
+
+src/components/auth/LoginForm.jsx
+  Email + password form fields, forgot-password link, and submit button.
+
+src/components/auth/SignupForm.jsx
+  First name, last name, username, email, password, and confirm-password fields.
+
+src/components/auth/PasswordField.jsx
+  Password input with show/hide toggle and optional live password requirement
+  checklist.
+
+src/components/auth/CodeForm.jsx
+  Six-digit numeric code input used for email confirmation, password reset, and
+  MFA. Includes resend and submit actions.
+
+src/components/auth/ProfileForm.jsx
+  First name, last name, and username fields for the "finish profile" step.
+
+src/components/auth/RequireAuth.jsx
+  Protects routes by calling GET /api/auth/me. Redirects to "/" on 401, shows a
+  retry screen on server/network failures, and renders children with the user.
+
+src/lib/cognitoClient.js
+  Lazy Amplify/Cognito client for the browser. Configures the user pool and wraps
+  signIn, signUp, confirmSignUp, resendSignUpCode, autoSignIn, resetPassword,
+  confirmResetPassword, confirmSignIn, fetchAuthSession, and signOut.
+  Decodes the ID token claims for consistency checks and exposes
+  readIdentityToken() for the backend session exchange.
+
+src/lib/cognito.js
+  Browser API client:
+    - startCognitoLogin / completeCognitoLogin (hosted-UI fallback)
+    - createBackendSession (profile step)
+    - createSessionFromIdentityToken (main custom-screen path -> /api/auth/token)
+    - resolveSignInIdentifier (email -> Cognito account name)
+    - apiFetch with safe-method retries and 503 Retry-After handling
+    - signOutFromCognito (calls /api/auth/logout and follows the Cognito logout
+      URL if provided)
+  Parses JSON errors into Error objects with status/code/details.
+
+src/lib/cognitoAccount.js
+  Helpers:
+    - cognitoAccountName(email): lowercase/trimmed email used as Cognito username
+    - cognitoUserAttributes(): preferred_username, given_name, family_name
+
+src/lib/authValidation.js
+  Pure validation rules:
+    - password requirements (length, uppercase, lowercase, number, symbol)
+    - username pattern
+    - email pattern
+    - 6-digit confirmation code validation/sanitization
+
+src/lib/authErrors.js
+  Maps Cognito error names (UserNotFoundException, NotAuthorizedException,
+  UserNotConfirmedException, UserAlreadyExistsException, CodeMismatchException,
+  ExpiredCodeException, TooManyRequestsException, etc.) to readable messages.
+  Also provides isUnknownAccountError, isExistingAccountError,
+  isNotConfirmedError, and sanitizes long identifiers from error details.
+
+src/lib/authFlow.js
+  Pure rules for deciding which screen a failure should lead to (login, signup,
+  confirm, forgot, reset, mfa, profile) and what message to show, for both API
+  error codes and Cognito error names. Prevents the UI from getting stuck on a
+  screen that cannot continue.
+
+src/lib/cognitoErrors.js
+  Maps hosted-UI OAuth error codes (access_denied, invalid_request,
+  invalid_scope, unauthorized_client, invalid_client, server_error,
+  temporarily_unavailable) to readable messages, with sanitization.
+
+src/hooks/useCollaborativeRoom.js
+  Browser collaboration hook. For a room:
+    - creates Y.Doc and Awareness
+    - connects Socket.IO with credentials
+    - emits room:join and applies the initial Yjs state
+    - listens for document/awareness/member/activity/error events
+    - sends local Yjs document updates and awareness updates
+    - reconnects and cleans up socket/Yjs objects on unmount
+    - computes user display name and a stable cursor color from user ID
+  Returns document, awareness, status, error, members, and activity.
+
+src/components/editor/CodeEditor.jsx
+  The main IDE screen (about 1,325 lines). Responsibilities:
+    - file explorer, tabs, active file
+    - bind CodeMirror to the active file's Yjs text via yCollab
+    - create/rename/delete Java files in the shared Y.Doc
+    - keep local React file list in sync with the Y.Doc
+    - preserve open tabs locally
+    - local browser snapshot save (Ctrl+S / localStorage migration)
+    - project file operations through /api/projects (S3)
+    - Run Java through /api/java/run and show compiler/runtime output
+    - program stdin input box
+    - refresh S3 file list, load active file from S3
+    - members panel and presence display
+    - search across workspace files, quick open (Ctrl+P), search (Ctrl+Shift+F)
+    - theme toggle, zoom, fullscreen, panel resizing/collapsing
+    - copy invite link, profile menu, logout
+    - toast/error feedback
+  It uses EditorToolbarButton, PanelSplitter, and QuickOpen.
+
+src/components/editor/codeEditor.css
+  Full IDE styling: top bar, explorer, tabs, CodeMirror area, members panel,
+  input/output console, status bar, splitters, light/dark theme, responsive
+  layouts.
+
+src/components/editor/EditorToolbarButton.jsx
+  Reusable accessible toolbar button with an inline SVG icon set.
+
+src/components/editor/PanelSplitter.jsx
+  Mouse/touch/keyboard resizer for panels (role="separator", arrow-key support).
+
+src/components/editor/QuickOpen.jsx
+  Modal file filter/open dialog. Enter opens the first match; Escape closes.
+
+SCRIPTS
+-------
+scripts/verifyCognitoSetup.mjs
+  Read-only Cognito configuration verification. See AWS section above.
+
+scripts/migrateMongoData.js
+  Non-destructive copy of `users` and `rooms` collections from one
+  MongoDB-compatible database to another. Copies indexes, inserts missing
+  documents, checks for conflicting documents, and verifies each copied document
+  with a SHA-256 digest. Never modifies the source.
+
+scripts/migrateRoomFilesToS3.js
+  Migrates legacy Yjs room snapshots stored in MongoDB (Room.state) to S3
+  workspace.json files. Validates the workspace, refuses to overwrite different
+  S3 data, verifies the copy, and can optionally remove the MongoDB snapshot only
+  after verification (--remove-verified-snapshots).
+
+TESTS
+-----
+The test/ directory uses Node's built-in test runner (`node --test`). Tests are
+mostly dependency-injected/fake-based and do not require real AWS or MongoDB.
+
+test/appErrorHandling.test.js
+  Express error handling: payload too large, invalid JSON, storage errors, 404.
+
+test/authAccountLinking.test.js
+  Linking accounts by verified Cognito subject/email, existing identity changes,
+  first-time profile creation, and username conflicts.
+
+test/authFlow.test.js
+  Which screen/message a failed sign-in leads to for API and Cognito errors.
+
+test/authRoutes.test.js
+  PKCE transaction, profile provisioning/linking, verified email, missing config.
+
+test/authSession.test.js
+  Session cookie flags, purpose binding, expiry, logout revocation, forged or
+  foreign-secret token rejection.
+
+test/authTokenSession.test.js
+  ID-token -> session exchange: session creation, stored Cognito username,
+  existing-account linking, profile step, unverified/invalid/missing token cases.
+
+test/authUiHelpers.test.js
+  Client-side email/username/password/code validation and error messages.
+
+test/cognitoAccount.test.js
+  Cognito account-name and attribute helpers.
+
+test/cognitoConfig.test.js
+  OAuth configuration validation, public-client default, region/domain matching,
+  callback/logout URL rules, logout URL.
+
+test/cognitoErrorMessages.test.js
+  Mapping hosted-UI provider errors to readable messages.
+
+test/cognitoPkce.test.js
+  S256 challenge, fresh state/nonce/verifier, state mismatch, single-use code.
+
+test/cognitoRetry.test.js
+  Retry behavior for refused sign-ins and Retry-After handling.
+
+test/cognitoTokenExchange.test.js
+  Authorization-code exchange behavior and provider error mapping.
+
+test/cognitoTokenValidation.test.js
+  ID-token signature, issuer, expiry, audience, token use, subject validation
+  using injected JWKS.
+
+test/collaboration.test.js
+  Socket.IO authentication (forged/purpose-less/revoked sessions), unknown
+  rooms, invalid updates, room-scoped broadcasts, join/leave activity, Yjs
+  convergence, concurrent edits, persistence via a stubbed room model.
+
+test/projectFileRoutes.test.js
+  S3-backed project file routes: auth, membership, validation, limits, CRUD.
+
+test/roomPresence.test.js
+  Multiple tabs = one member; leave only after the last socket disconnects.
+
+test/roomRoutes.test.js
+  Starter-code template, authenticated room creation, S3+S3 verification,
+  rejection without auth.
+
+test/s3Storage.test.js
+  S3 storage layer behavior: read/write/list/delete, validation, legacy
+  migration, serialization/verification, SSE, missing-object handling.
+
+
+================================================================================
+6. API ROUTES
+================================================================================
+
+Authentication (mounted at /api/auth):
+  POST /api/auth/login
+    Start the hosted-UI PKCE fallback. Returns a Cognito authorization URL.
+  POST /api/auth/callback
+    Validate transaction state, exchange the authorization code, verify the ID
+    token + nonce, link/create the user, set the session cookie.
+  POST /api/auth/session
+    Create a session from the temporary verified-profile cookie (profile step).
+  POST /api/auth/token
+    MAIN PATH: verify a Cognito ID token sent by the custom sign-in screen, link
+    or create the MongoDB user, set the DevLoop session cookie.
+  POST /api/auth/resolve-signin
+    Map a typed email/username to the name Cognito knows the account by.
+  POST /api/auth/logout
+    Revoke the session, clear cookies, return the Cognito logout URL if configured.
+  GET  /api/auth/me
+    Return the current public user for a valid session cookie.
+
+Rooms (mounted at /api/rooms):
+  POST /api/rooms
+    Create a room with a starter Main.java, write/verify S3 files, create Room
+    metadata in MongoDB, return { roomId }.
+  PUT /api/rooms/:roomId/presence
+    Refresh in-memory presence and return the current members.
+
+Java (mounted at /api/java):
+  POST /api/java/run
+    Compile and run a submitted Java project with optional stdin. Returns stage,
+    success, exitCode, output, timedOut, outputLimitExceeded.
+
+Project files (mounted at /api/projects):
+  GET    /api/projects/:roomId/files
+  PUT    /api/projects/:roomId/files
+  PUT    /api/projects/:roomId/files/:fileName
+  GET    /api/projects/:roomId/files/:fileName
+  DELETE /api/projects/:roomId/files/:fileName
+    All require auth + active room membership and use S3 storage.
+
+Health/other:
+  There is no dedicated health endpoint. Unknown routes return JSON 404.
+
+
+================================================================================
+7. SOCKET.IO EVENTS
+================================================================================
+
+Connection:
+  - Client connects with credentials (session cookie).
+  - Server verifies the cookie and loads the user before accepting the socket.
+
+Client -> Server:
+  room:join                 Ask to join a room. Ack: { ok, roomId, members, state }
+                            where state is a base64 Yjs state update.
+  room:leave                Leave the current room.
+  room:document-update      Send a Yjs update (max 512 KB). Server validates,
+                            applies, persists, and relays to other room members.
+  room:awareness-update     Send cursor/awareness update (max 16 KB).
+
+Server -> Client:
+  room:document-update      Remote Yjs document update.
+  room:awareness-update     Remote cursor/awareness update.
+  room:members              Current member list.
+  room:participant-joined   A user joined (not just another tab).
+  room:participant-left     A user left.
+  room:error                Invalid update, workspace limit exceeded, or S3
+                            persistence failure.
+
+
+================================================================================
+8. DATA STORAGE AND STATE
+================================================================================
+
+MongoDB (Mongoose):
+  users collection
+    - profile data, unique username/email, Cognito subject/username
+  rooms collection
+    - roomId, createdBy, timestamps
+    - optional legacy `state` Buffer containing an old Yjs snapshot
+  The database itself is created on first write.
+
+Amazon S3:
+  - projects/<roomId>/workspace.json
+  - one JSON object with all Java files for the room
+  - SSE-S3 AES256 encryption
+  - primary persistence for the shared workspace
+
+In-memory (lost on API restart):
+  - active Yjs documents per room
+  - room presence/member lists
+  - revoked session IDs
+  - temporary consumed OAuth transactions
+  - temporary verified-profile data is stored in signed cookies instead
+
+Browser local storage:
+  - legacy/optional local workspace snapshot keyed by user + room
+  - open editor tabs and some UI layout state are local to each browser
+
+Ownership:
+  - The shared workspace belongs to the room and is synchronized through Yjs
+    and persisted to S3.
+  - Open tabs, theme choice, zoom, and panel sizes are local UI state.
+  - Presence is not durable; it is in-process memory.
+
+
+================================================================================
+9. AUTHENTICATION FLOW IN DETAIL
+================================================================================
+
+Custom DevLoop screen (main path):
+  1. The browser lazily loads Amplify and configures the Cognito user pool.
+  2. For sign-in, the browser calls Cognito with email + password using SRP.
+     The password is never sent to our backend and never travels in clear text.
+  3. If Cognito requires email confirmation, MFA, or password reset, the screen
+     shows the appropriate step.
+  4. When Cognito accepts the sign-in, the browser reads the ID token.
+  5. The browser sends the ID token to POST /api/auth/token.
+  6. The server verifies signature/issuer/expiry/audience/token_use/subject.
+  7. The server requires a verified email address.
+  8. The server finds the user by Cognito subject, or links by normalized email,
+     or creates a new profile. Usernames/emails must be unique.
+  9. The server sets an HTTP-only JWT session cookie (1 hour).
+ 10. The browser drops the Cognito session/tokens from its own storage, so the
+     DevLoop cookie is the only ongoing app session.
+ 11. Logout revokes the JWT server-side and clears cookies; if configured, the
+     browser is also sent to Cognito's logout endpoint.
+
+Hosted-UI fallback (still supported):
+  - POST /api/auth/login creates a signed transaction cookie containing state,
+    nonce, PKCE code verifier, mode, profile, and returnTo.
+  - The server returns the Cognito authorization URL.
+  - Cognito redirects back with code + state.
+  - POST /api/auth/callback verifies the transaction, consumes it once, exchanges
+    the code at the token endpoint with PKCE, verifies the ID token and nonce,
+    links/creates the user, and sets the session cookie.
+  - Logout can also clear the Cognito hosted session.
+
+Account naming:
+  - The Cognito user pool uses email as the sign-in attribute.
+  - The account name sent to Cognito is the lowercased email address.
+  - The DevLoop username is stored as Cognito's preferred_username attribute
+    and also in MongoDB.
+  - Existing DevLoop accounts are linked only when the Cognito email is verified
+    and matches.
+
+
+================================================================================
+10. LIMITS AND SECURITY NOTES
+================================================================================
+
+Workspace limits:
+  - 1 to 20 Java files per project
+  - each file <= 32 KB
+  - total source <= 128 KB
+  - Main.java required as the entry point
+  - program stdin <= 16 KB
+  - Java compile timeout: 15 seconds
+  - Java run timeout: 8 seconds
+  - Java run output: capped at 64 KB
+  - Yjs document update over Socket.IO: max 512 KB
+  - awareness update: max 16 KB
+  - Socket.IO max HTTP buffer: 1 MB
+  - Express JSON body limit: 256 KB
+
+Security:
+  - Passwords are managed by Cognito; DevLoop does not store passwords for
+    Cognito accounts. A legacy passwordHash field is kept but unused.
+  - Session cookie is HTTP-only, SameSite=Lax, Secure in production, 1-hour TTL.
+  - Logout revokes the session in server memory.
+  - Cognito ID tokens are fully verified server-side.
+  - Hosted-UI flows use state, nonce, PKCE S256, single-use transactions, and
+    timing-safe state comparison.
+  - Room/project routes require authentication and active room membership.
+  - Socket.IO authenticates the handshake from the cookie.
+  - S3 access is server-only; no AWS keys in the browser.
+  - File names, sizes, counts, and required Main.java are validated at multiple
+    layers (HTTP, S3 storage, collaboration, Java runner).
+  - The Java runner is NOT a secure sandbox. It runs as the backend OS user.
+    Only run code you trust. For public/untrusted code, use a real isolated
+    sandbox/container service.
+  - Invite links are invitations, but invitees still need an account and login.
+  - The app is designed for a single API instance. Multiple instances would need
+    a shared Socket.IO adapter, shared presence, and a shared session-revocation
+    store.
+
+
+================================================================================
+11. HOW TO RUN AND VERIFY
+================================================================================
+
+Prerequisites:
+  - Node.js + npm
+  - MongoDB or a MongoDB-compatible database
+  - A JDK with `javac` and `java` on PATH
+  - An existing Amazon Cognito user pool + app client (email sign-in)
+  - AWS credentials for S3 access
+
+Install and configure:
+  npm install
+  cp .env.example .env        (on Windows: Copy-Item .env.example .env)
+  # edit .env:
+  #   MONGODB_URI
+  #   JWT_SECRET (random, at least 32 chars)
+  #   Cognito settings
+  #   AWS/S3 settings and credentials
+  #   COGNITO_CALLBACK_URL / COGNITO_LOGOUT_URL
+
+Verify Cognito (read-only):
+  npm run verify:cognito
+
+Run frontend + backend together:
+  npm run dev
+    - API on http://127.0.0.1:3001
+    - Vite serves the UI and proxies /api and /socket.io
+    - Run the API alone with: npm run dev:api
+
+Other checks:
+  npm test           Node built-in test runner
+  npm run lint       Oxlint
+  npm run build      Vite production build into dist/
+  npm run preview    Preview the production build
+
+Migration helpers (optional):
+  npm run migrate:mongodb       Copy users/rooms between databases
+  npm run migrate:room-files    Move legacy MongoDB room snapshots to S3
+
+Important: MongoDB must be reachable before login/signup/room operations work.
+For "Run Java", the JDK must be installed and on PATH.
+
+
+================================================================================
+12. QUICK EXPLANATION FOR A NON-TECHNICAL AUDIENCE
+================================================================================
+
+"DevLoop is like Google Docs, but for Java code. A person creates a meeting room
+and shares the link. Everyone in the room sees the same files and edits them live.
+The website is the frontend. A server keeps everyone in sync and runs the Java
+program when someone clicks Run. Accounts are handled by Amazon Cognito, so
+passwords and email verification are managed by AWS. The project files are saved
+in Amazon S3, so the code is still there later. MongoDB keeps the user accounts
+and room information. The backend compiles and runs the Java using the computer's
+Java tools. It is built for local/trusted use, not as a secure public sandbox."
+
+
+================================================================================
+13. IMPORTANT NOTES / POSSIBLE CONFUSION
+================================================================================
+
+1. The current code uses Amazon S3 as the primary project-file store. The older
+   README/PROJECT_REPORT wording says room state is persisted in MongoDB. MongoDB
+   is still used for users, room metadata, and legacy Yjs snapshots; S3 stores
+   the current workspace.json files.
+2. The name "cloud-code-editor" is the folder/package name; the product name is
+   DevLoop.
+3. VITE_* Cognito values are public identifiers, not secrets. Do not put AWS
+   access keys or COGNITO_CLIENT_SECRET in VITE_* variables.
+4. .env and .env.save may contain real credentials/secrets. Never share them.
+5. Presence, session revocation, and temporary OAuth state are in memory; a
+   server restart clears them.
+6. The Java runner is for trusted local code only. It is not a hardened sandbox.
+7. AWS resources are not created automatically. The verification script only
+   reads; creating a Cognito pool/client or an S3 bucket is a manual, reviewed
+   AWS action.
+8. dist/ and node_modules/ are generated. Do not edit them as source.
+9. Tests use fakes/dependency injection and generally do not call real AWS or
+   MongoDB.
+
+================================================================================
+END OF FILE
+================================================================================
